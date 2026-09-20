@@ -10,4 +10,8 @@ autobins = false
 [dependencies]
 lightwatch-proto = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.53", features = ["sync"] }
+tokio = { version = "1.53", features = ["io-util", "net", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
