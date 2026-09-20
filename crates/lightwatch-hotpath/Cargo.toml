@@ -7,3 +7,7 @@ repository.workspace = true
 
 [dependencies]
 lightwatch-proto = { workspace = true }
+# `json` alone gives the report types and `parse_duration` without linking the
+# profiling runtime, so the bridge never instruments itself.
+hotpath = { version = "0.26", default-features = false, features = ["json"] }
+serde_json = "1"
