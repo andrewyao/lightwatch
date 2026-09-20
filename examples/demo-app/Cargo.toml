@@ -1,0 +1,8 @@
+[package]
+name = "demo-app"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+lightwatch-proto = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "lightwatch-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol for lightwatch: the frames a profiled process emits."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

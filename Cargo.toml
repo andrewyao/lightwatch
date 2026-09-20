@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lightwatch-proto",
+    "crates/lightwatch-daemon",
+    "crates/lightwatch-hotpath",
+    "crates/lightwatch-probe",
+    "examples/demo-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/andrewyao/lightwatch"
+
+[workspace.dependencies]
+lightwatch-proto = { path = "crates/lightwatch-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
