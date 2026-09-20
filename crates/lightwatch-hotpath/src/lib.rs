@@ -33,3 +33,5 @@
 //! Rust probe is the full-fidelity path.
 
 pub mod bridge;
+pub mod sink;
+pub mod source;
