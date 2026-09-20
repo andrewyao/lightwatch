@@ -5,6 +5,7 @@ members = [
     "crates/lightwatch-daemon",
     "crates/lightwatch-hotpath",
     "crates/lightwatch-probe",
+    "crates/lightwatch-probe-macros",
     "examples/demo-app",
 ]
 
