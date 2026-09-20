@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Ingests lightwatch protocol streams and serves them over HTTP."
+autobins = false
 
 [dependencies]
 lightwatch-proto = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.53", features = ["sync"] }
