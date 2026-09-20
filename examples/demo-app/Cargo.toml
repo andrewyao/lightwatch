@@ -4,5 +4,13 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[features]
+# Off by default, which is what proves an unmeasured build of the same source
+# carries none of the probe.
+default = []
+enabled = ["lightwatch/enabled"]
+
 [dependencies]
-lightwatch-proto = { workspace = true }
+# Renamed, so the attributes read `#[lightwatch::measure]` the way a consumer
+# would write them.
+lightwatch = { package = "lightwatch-probe", version = "0.1.0", path = "../../crates/lightwatch-probe" }
