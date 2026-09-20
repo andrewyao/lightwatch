@@ -86,14 +86,19 @@ fn main() {
     let mut log = Log::default();
     loop {
         let started = Instant::now();
-        match poll_once(&target, &args, session.take()) {
-            Ok(open) => {
-                session = Some(open);
+        match poll_once(&target, &args, &mut session) {
+            Ok(()) => {
                 backoff = window;
                 log.recovered();
                 std::thread::sleep(window.saturating_sub(started.elapsed()));
             }
             Err(trouble) => {
+                // A target that stutters keeps its stream. A daemon that hangs
+                // up loses one, because the registrations the next connection
+                // needs live in the stream that just died with it.
+                if matches!(trouble, Trouble::Daemon(_)) {
+                    session = None;
+                }
                 log.trouble(trouble.to_string());
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -102,28 +107,28 @@ fn main() {
     }
 }
 
-/// Reads the target once and sends the frame it implies. A session that comes
-/// back out is good for the next window; anything else surfaces as an error
-/// and drops the session with it.
-fn poll_once(target: &Target, args: &Args, session: Option<Session>) -> Result<Session, Trouble> {
+/// Reads the target once and sends the frame it implies.
+fn poll_once(target: &Target, args: &Args, session: &mut Option<Session>) -> Result<(), Trouble> {
+    // Both reads happen before the session is touched, so a target that
+    // stutters for a window costs that window rather than the whole stream.
     let status = target.status().map_err(Trouble::Target)?;
     let report = target.functions_timing().map_err(Trouble::Target)?;
 
-    let mut session = match session {
-        Some(open) if open.stream.same_run(status.pid, report.total_elapsed_ns) => open,
-        Some(_) => {
-            eprintln!(
-                "target restarted as pid {}, opening a new stream",
-                status.pid
-            );
-            open_session(args, status.pid, &report)?
-        }
-        None => open_session(args, status.pid, &report)?,
-    };
+    let continues = |s: &Session| s.stream.same_run(status.pid, report.total_elapsed_ns);
+    if session.as_ref().is_some_and(|s| !continues(s)) {
+        eprintln!(
+            "target restarted as pid {}, opening a new stream",
+            status.pid
+        );
+        *session = None;
+    }
 
-    let frame = session.stream.absorb(&report);
-    session.connection.send(frame).map_err(Trouble::Daemon)?;
-    Ok(session)
+    let active = match session {
+        Some(active) => active,
+        slot => slot.insert(open_session(args, status.pid, &report)?),
+    };
+    let frame = active.stream.absorb(&report);
+    active.connection.send(frame).map_err(Trouble::Daemon)
 }
 
 fn open_session(
@@ -148,7 +153,7 @@ fn open_session(
 }
 
 /// hotpath reports elapsed time since its own start, which is close enough to
-/// process start to tell a recycled pid from a reused one.
+/// process start for the daemon to tell two runs that got the same pid apart.
 fn process_start_unix_ms(elapsed_ns: u64) -> u64 {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
