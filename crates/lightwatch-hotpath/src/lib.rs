@@ -28,6 +28,11 @@
 //!   to the precision that string carries.
 //! - **A mean, not a distribution.** See [`bridge`] for what is emitted in
 //!   place of one and why the percentile fields are not used.
+//! - **Not every measured function is visible.** hotpath truncates its report
+//!   to a row limit and says so, in `total_count` against `included_count`. A
+//!   profiled lightphotos measures 17 functions and lists 15, so two of them
+//!   reach no interface this bridge feeds. Which two can change between polls,
+//!   which is why [`bridge`] never treats a missing row as a quiet one.
 //!
 //! Its job is to light up the interface against an unmodified application. The
 //! Rust probe is the full-fidelity path.
