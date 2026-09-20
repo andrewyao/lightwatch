@@ -4,6 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Emits lightwatch frames from a running Rust program: call edges and live-object census."
+
+[features]
+# Off by default, so a dependency on lightwatch costs an un-measured build
+# nothing. Turning it on is what compiles the recorder, the census counters and
+# the emit thread into the binary.
+default = []
+enabled = ["lightwatch-probe-macros/enabled"]
 
 [dependencies]
 lightwatch-proto = { workspace = true }
+lightwatch-probe-macros = { version = "0.1.0", path = "../lightwatch-probe-macros" }
+
+[dev-dependencies]
+serde_json = "1.0"

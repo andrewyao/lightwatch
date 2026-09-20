@@ -4,8 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Attribute macros for lightwatch-probe. Use lightwatch-probe, not this crate."
 
 [lib]
 proc-macro = true
 
+[features]
+# Driven by lightwatch-probe's feature of the same name. With it off,
+# `#[measure]` hands the function body back unchanged.
+default = []
+enabled = []
+
 [dependencies]
+proc-macro2 = "1.0"
+proc-macro-crate = "3.2"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing", "printing", "proc-macro"] }
