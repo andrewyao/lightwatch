@@ -13,6 +13,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
 use crate::api;
+use crate::session::{self, Feed};
 use crate::store::{now_unix_ms, ProcessId, Registry, Update};
 
 /// The web UI's built bundle. Empty until a UI is built into it, at which point
@@ -33,6 +34,8 @@ pub fn router(registry: Arc<Registry>) -> Router {
         .route("/api/processes", get(list_processes))
         .route("/api/processes/{id}/snapshot", get(snapshot))
         .route("/api/processes/{id}/stream", get(stream))
+        .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions/{id}/stream", get(session_stream))
         .fallback(static_file)
         .with_state(registry)
 }
@@ -54,6 +57,111 @@ async fn snapshot(
     let state = registry.get(&ProcessId::from(id.as_str())).ok_or(StatusCode::NOT_FOUND)?;
     let process = state.read().expect("process lock");
     Ok(Json(api::snapshot(&process, now_unix_ms())))
+}
+
+async fn list_sessions(State(registry): State<Arc<Registry>>) -> Json<api::SessionList> {
+    Json(api::session_list(session::pair_sessions(&registry)))
+}
+
+/// Both of a session's feeds down one socket. There is no matching snapshot
+/// route: a session names its process ids, and each one already has a snapshot.
+async fn session_stream(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let Some(session) = session::find(&registry, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let subscribe = |member: Option<&session::Member>| {
+        let member = member?;
+        let state = registry.get(&member.process_id)?;
+        let updates = state.read().expect("process lock").subscribe();
+        Some((member.process_id.clone(), updates))
+    };
+    let cpu = subscribe(session.cpu.as_ref());
+    let memory = subscribe(session.memory.as_ref());
+    if cpu.is_none() && memory.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    upgrade.on_upgrade(move |socket| fan_in(socket, session.id, cpu, memory))
+}
+
+type Updates = tokio::sync::broadcast::Receiver<Arc<Update>>;
+
+/// One message per closed window from either feed, tagged with which.
+///
+/// `select!` over the two receivers rather than a task per feed: the socket has
+/// one writer, and a second task would need a channel to reach it that would
+/// only re-buffer what `broadcast` already buffers.
+async fn fan_in(
+    mut socket: WebSocket,
+    session_id: String,
+    cpu: Option<(ProcessId, Updates)>,
+    memory: Option<(ProcessId, Updates)>,
+) {
+    // A session with one emitter still has to wait on its socket and on the
+    // feed it does have. The missing half becomes a receiver whose sender
+    // nobody holds but this function, so it pends instead of reporting itself
+    // closed and spinning the loop.
+    let (idle, _) = tokio::sync::broadcast::channel::<Arc<Update>>(1);
+    let absent = || (ProcessId::from(""), idle.subscribe());
+    let (cpu_id, mut cpu_updates) = cpu.unwrap_or_else(absent);
+    let (memory_id, mut memory_updates) = memory.unwrap_or_else(absent);
+
+    loop {
+        let message = tokio::select! {
+            update = cpu_updates.recv() => {
+                match tagged(&session_id, Feed::Cpu, &cpu_id, update) {
+                    Tagged::Send(message) => Some(message),
+                    Tagged::Skip => None,
+                    Tagged::Stop => break,
+                }
+            }
+            update = memory_updates.recv() => {
+                match tagged(&session_id, Feed::Memory, &memory_id, update) {
+                    Tagged::Send(message) => Some(message),
+                    Tagged::Skip => None,
+                    Tagged::Stop => break,
+                }
+            }
+            // A client that goes away is only noticed by reading from it.
+            incoming = socket.recv() => match incoming {
+                None | Some(Err(_)) => break,
+                Some(Ok(_)) => None,
+            },
+        };
+        let Some(message) = message else { continue };
+        let Ok(text) = serde_json::to_string(&message) else { break };
+        if socket.send(WsMessage::Text(text.into())).await.is_err() {
+            break;
+        }
+    }
+}
+
+enum Tagged {
+    Send(api::SessionStreamMessage),
+    Skip,
+    Stop,
+}
+
+fn tagged(
+    session_id: &str,
+    feed: Feed,
+    process_id: &ProcessId,
+    update: Result<Arc<Update>, RecvError>,
+) -> Tagged {
+    match update {
+        Ok(update) => {
+            Tagged::Send(api::session_stream_message(session_id, feed, process_id, &update))
+        }
+        Err(RecvError::Lagged(missed)) => {
+            let lost = "a session client fell behind and lost windows";
+            warn!(session = %session_id, process = %process_id, missed, lost);
+            Tagged::Skip
+        }
+        Err(RecvError::Closed) => Tagged::Stop,
+    }
 }
 
 async fn stream(
@@ -123,6 +231,8 @@ No web UI is embedded in this build. The API is live:
   GET /api/processes                    every process this daemon has seen
   GET /api/processes/{id}/snapshot      functions, types, edges and the fine ring
   GET /api/processes/{id}/stream        websocket, one message per closed window
+  GET /api/sessions                     one entry per program, both emitters joined
+  GET /api/sessions/{id}/stream         websocket, both feeds, each message tagged
 
 Emitters connect to the unix socket named by $LIGHTWATCH_SOCK_DIR.
 See crates/lightwatch-daemon/API.md for the response shapes.
@@ -149,8 +259,13 @@ mod tests {
 
     #[test]
     fn the_placeholder_names_every_route_the_daemon_serves() {
-        for route in ["/api/processes", "/api/processes/{id}/snapshot", "/api/processes/{id}/stream"]
-        {
+        for route in [
+            "/api/processes",
+            "/api/processes/{id}/snapshot",
+            "/api/processes/{id}/stream",
+            "/api/sessions",
+            "/api/sessions/{id}/stream",
+        ] {
             assert!(PLACEHOLDER.contains(route), "the placeholder does not mention {route}");
         }
     }
