@@ -26,15 +26,28 @@ pub fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Identifies one run of one program. `started_unix_ms` is what keeps a
-/// recycled pid from colliding with the process that used to own it, and what
-/// lets a process that reconnects resume its own history.
+/// Identifies one stream from one run of one program. `started_unix_ms` keeps a
+/// recycled pid from colliding with the process that used to own it, and lets a
+/// stream that reconnects resume its own history.
+///
+/// `source` is in the id because two emitters watching one OS process agree on
+/// the pid and can agree on the start time as well. The probe reads
+/// `SystemTime::now()` as it starts; a bridge outside the target estimates
+/// `now - elapsed`, and when both happen at the top of `main` the two land on
+/// the same millisecond. Without the source they share one `ProcessState`, and
+/// two independent `seq` counters folded into one ring inflate the call totals
+/// by orders of magnitude while reporting the gap as missed frames. Pairing the
+/// two back together is [`crate::session`]'s job, at read time.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessId(String);
 
 impl ProcessId {
-    pub fn of(pid: u32, started_unix_ms: u64) -> Self {
-        ProcessId(format!("{pid}-{started_unix_ms}"))
+    pub fn of(pid: u32, started_unix_ms: u64, source: &str) -> Self {
+        ProcessId(format!("{pid}-{started_unix_ms}-{source}"))
+    }
+
+    pub fn of_hello(hello: &Hello) -> Self {
+        ProcessId::of(hello.pid, hello.started_unix_ms, &hello.source)
     }
 }
 
@@ -338,7 +351,7 @@ impl Registry {
     /// Admits a connection. A process that reconnects resumes the state it
     /// left behind rather than starting a second, half-empty history.
     pub fn connect(&self, hello: &Hello) -> Arc<RwLock<ProcessState>> {
-        let id = ProcessId::of(hello.pid, hello.started_unix_ms);
+        let id = ProcessId::of_hello(hello);
         let state = {
             let mut processes = self.processes.write().expect("registry lock");
             processes
@@ -541,9 +554,9 @@ mod tests {
         let state = registry.connect(&hello());
         state.write().unwrap().apply_frame(&registered_frame());
         state.write().unwrap().apply_frame(&calls_frame(1, 100_000_000, 7));
-        registry.disconnect(&ProcessId::of(4242, 1_700_000_000_000));
+        registry.disconnect(&ProcessId::of(4242, 1_700_000_000_000, "test"));
 
-        let held = registry.get(&ProcessId::of(4242, 1_700_000_000_000)).expect("still listed");
+        let held = registry.get(&ProcessId::of(4242, 1_700_000_000_000, "test")).expect("still listed");
         let process = held.read().unwrap();
         assert!(process.ended_unix_ms.is_some());
         assert!(!process.is_connected());
@@ -556,13 +569,76 @@ mod tests {
         let state = registry.connect(&hello());
         state.write().unwrap().apply_frame(&registered_frame());
         state.write().unwrap().apply_frame(&calls_frame(1, 100_000_000, 7));
-        registry.disconnect(&ProcessId::of(4242, 1_700_000_000_000));
+        registry.disconnect(&ProcessId::of(4242, 1_700_000_000_000, "test"));
 
         let again = registry.connect(&hello());
         assert_eq!(registry.len(), 1, "a reconnect is not a second process");
         let process = again.read().unwrap();
         assert!(process.ended_unix_ms.is_none());
         assert_eq!(process.functions[&FunctionId(1)].calls.get(), 7);
+    }
+
+    #[test]
+    fn two_emitters_that_agree_on_the_start_millisecond_still_get_a_history_each() {
+        // Reproduced live on lightphotos pid 69185: the probe reads
+        // `SystemTime::now()` at the top of `main` and a bridge outside the
+        // target estimates `now - elapsed` from the same instant, so both
+        // announced 1790021787941 and the registry handed them one state. The
+        // bridge's calls then folded into the probe's ring behind the probe's
+        // `seq`, and `working_thumb_keys` read 6,950/s against a true 125/s.
+        let registry = Registry::new();
+        let started = 1_790_021_787_941;
+        let probe = registry.connect(&Hello::new("lightphotos", "lightwatch-probe", 69185, started));
+        let bridge =
+            registry.connect(&Hello::new("lightphotos", "lightwatch-hotpath", 69185, started));
+        assert_eq!(registry.len(), 2, "one OS process watched twice is two streams");
+        assert!(!Arc::ptr_eq(&probe, &bridge), "and they must not share a ProcessState");
+
+        let type_only = Frame {
+            seq: 399,
+            t_ns: 0,
+            registers: vec![Register::Type { id: TypeId(1), name: "DecodedImage".into(), location: None }],
+            events: vec![],
+        };
+        let functions_only = Frame {
+            seq: 0,
+            t_ns: 0,
+            registers: vec![
+                Register::Function {
+                    id: FunctionId(1),
+                    name: "working_thumb_keys".into(),
+                    module: None,
+                    location: None,
+                },
+                Register::Function { id: FunctionId(2), name: "sync".into(), module: None, location: None },
+            ],
+            events: vec![],
+        };
+        probe.write().unwrap().apply_frame(&type_only);
+        bridge.write().unwrap().apply_frame(&functions_only);
+
+        // The probe has been emitting since the program started and is deep
+        // into its own sequence; the bridge attached later and starts at zero.
+        for step in 1..=5u64 {
+            let t_ns = step * 100_000_000;
+            probe.write().unwrap().apply_frame(&census_frame(399 + step, t_ns, 21, 15_024_107));
+            bridge.write().unwrap().apply_frame(&calls_frame(step, t_ns, 125));
+        }
+
+        let probe = probe.read().unwrap();
+        let bridge = bridge.read().unwrap();
+        assert_eq!(probe.source, "lightwatch-probe", "neither hello overwrites the other's");
+        assert_eq!(bridge.source, "lightwatch-hotpath");
+        assert_eq!(probe.counts.missed_frames, 0, "seq 400 is not a gap in a sequence that starts at 0");
+        assert_eq!(bridge.counts.missed_frames, 0);
+        assert_eq!(
+            bridge.functions[&FunctionId(1)].calls.get(),
+            625,
+            "the bridge's own calls, not two emitters' frames folded together"
+        );
+        assert_eq!(probe.types[&TypeId(1)].latest.as_ref().expect("a census").live.get(), 21);
+        assert!(probe.functions.is_empty(), "the probe registered no function and holds none");
+        assert!(bridge.types.is_empty(), "the bridge registered no type and holds none");
     }
 
     #[test]
