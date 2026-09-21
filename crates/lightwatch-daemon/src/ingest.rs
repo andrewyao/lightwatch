@@ -7,18 +7,15 @@
 //! corrupted frame does not cost a UI the rest of a run.
 
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use lightwatch_proto::{Message, SCHEMA_VERSION};
+use lightwatch_proto::{Message, SCHEMA_VERSION, SOCKET_FILE};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::net::UnixListener;
 use tracing::{debug, info, warn};
 
 use crate::store::{ProcessId, Registry};
-
-/// The socket the daemon listens on inside its socket directory.
-pub const SOCKET_FILE: &str = "lightwatch.sock";
 
 /// A line longer than this is a client that will never send a newline. The
 /// daemon stops reading rather than growing a buffer on its behalf.
@@ -40,39 +37,6 @@ pub enum Outcome {
     /// The stream ran to its end. `frames` counts the frames accepted on this
     /// connection, `skipped` the lines that were not usable frames.
     Ended { process: ProcessId, frames: u64, skipped: u64 },
-}
-
-/// Where connections are accepted. `$LIGHTWATCH_SOCK_DIR` wins; otherwise
-/// `$TMPDIR/lightwatch` on macOS and `$XDG_RUNTIME_DIR/lightwatch` elsewhere.
-pub fn socket_dir() -> PathBuf {
-    resolve_socket_dir(
-        std::env::var_os("LIGHTWATCH_SOCK_DIR").map(PathBuf::from),
-        std::env::var_os("TMPDIR").map(PathBuf::from),
-        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
-        cfg!(target_os = "macos"),
-        std::env::temp_dir(),
-    )
-}
-
-fn resolve_socket_dir(
-    explicit: Option<PathBuf>,
-    tmpdir: Option<PathBuf>,
-    xdg_runtime: Option<PathBuf>,
-    on_macos: bool,
-    temp_dir: PathBuf,
-) -> PathBuf {
-    if let Some(explicit) = explicit {
-        return explicit;
-    }
-    if on_macos {
-        if let Some(tmpdir) = tmpdir {
-            return tmpdir.join("lightwatch");
-        }
-    }
-    match xdg_runtime {
-        Some(runtime) => runtime.join("lightwatch"),
-        None => temp_dir.join("lightwatch"),
-    }
 }
 
 /// Creates the socket directory if it is missing and binds the listener.
@@ -404,31 +368,6 @@ mod tests {
                 .calls
                 .get(),
             2
-        );
-    }
-
-    #[test]
-    fn the_socket_directory_prefers_the_explicit_override_then_the_platform_default() {
-        let explicit = Some(PathBuf::from("/run/chosen"));
-        let tmpdir = Some(PathBuf::from("/var/tmp-per-user"));
-        let xdg = Some(PathBuf::from("/run/user/501"));
-        let fallback = PathBuf::from("/tmp");
-
-        assert_eq!(
-            resolve_socket_dir(explicit.clone(), tmpdir.clone(), xdg.clone(), true, fallback.clone()),
-            PathBuf::from("/run/chosen")
-        );
-        assert_eq!(
-            resolve_socket_dir(None, tmpdir.clone(), xdg.clone(), true, fallback.clone()),
-            PathBuf::from("/var/tmp-per-user/lightwatch")
-        );
-        assert_eq!(
-            resolve_socket_dir(None, tmpdir, xdg.clone(), false, fallback.clone()),
-            PathBuf::from("/run/user/501/lightwatch")
-        );
-        assert_eq!(
-            resolve_socket_dir(None, None, None, false, fallback),
-            PathBuf::from("/tmp/lightwatch")
         );
     }
 }

@@ -7,9 +7,9 @@
 
 use clap::Parser;
 use lightwatch_hotpath::bridge::{app_name, Stream};
-use lightwatch_hotpath::sink::{Connection, DEFAULT_SOCKET};
+use lightwatch_hotpath::sink::Connection;
 use lightwatch_hotpath::source::{PollError, Target};
-use lightwatch_proto::{Hello, DEFAULT_WINDOW_MS};
+use lightwatch_proto::{socket_dir, Hello, DEFAULT_WINDOW_MS, SOCKET_FILE};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,8 +34,9 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_WINDOW_MS)]
     window_ms: u32,
 
-    /// Daemon ingest socket.
-    #[arg(long, default_value = DEFAULT_SOCKET)]
+    /// Daemon ingest socket. Defaults to where the daemon binds, which
+    /// `$LIGHTWATCH_SOCK_DIR` moves for both of them at once.
+    #[arg(long, default_value_os_t = socket_dir().join(SOCKET_FILE))]
     socket: PathBuf,
 
     /// Milliseconds to wait on the target before giving up on one poll.

@@ -8,10 +8,15 @@
 //! The encoding is one JSON object per line. That is the whole contract a
 //! client in another language has to meet. MessagePack over the same socket is
 //! an optimization for the Rust probe, not a second protocol.
+//!
+//! Which socket is part of that contract as well, so [`socket`] carries the
+//! rule every participant finds it by.
 
 pub mod dist;
+pub mod socket;
 
 pub use dist::{bucket_of, bucket_range, Dist};
+pub use socket::{socket_dir, SOCKET_FILE};
 
 use serde::{Deserialize, Serialize};
 

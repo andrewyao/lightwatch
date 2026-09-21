@@ -10,8 +10,6 @@ use std::io::{self, BufWriter, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-pub const DEFAULT_SOCKET: &str = "/tmp/lightwatch.sock";
-
 /// An open stream to the daemon.
 pub struct Connection {
     writer: BufWriter<UnixStream>,
