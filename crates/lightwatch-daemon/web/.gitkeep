@@ -1,3 +1,0 @@
-The web UI's built bundle lands in this directory and is embedded into the
-binary at compile time. While the directory holds no index.html the daemon
-serves a plain-text placeholder at /.

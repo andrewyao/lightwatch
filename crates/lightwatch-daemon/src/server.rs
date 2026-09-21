@@ -16,8 +16,8 @@ use crate::api;
 use crate::session::{self, Feed};
 use crate::store::{now_unix_ms, ProcessId, Registry, Update};
 
-/// The web UI's built bundle. Empty until a UI is built into it, at which point
-/// `/` starts serving the bundle instead of the placeholder.
+/// The web UI, embedded at compile time. Editing anything under `web/` needs a
+/// rebuild of this crate to reach a running daemon.
 static WEB: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web");
 
 pub const DEFAULT_PORT: u16 = 7700;
