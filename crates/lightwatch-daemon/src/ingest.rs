@@ -249,7 +249,7 @@ mod tests {
     }
 
     fn demo_id() -> ProcessId {
-        ProcessId::of(4242, 1_700_000_000_000)
+        ProcessId::of(4242, 1_700_000_000_000, "test")
     }
 
     #[tokio::test]
@@ -360,7 +360,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .get(&ProcessId::of(99, 1_700_000_000_001))
+                .get(&ProcessId::of(99, 1_700_000_000_001, "test"))
                 .unwrap()
                 .read()
                 .unwrap()

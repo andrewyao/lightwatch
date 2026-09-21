@@ -38,14 +38,20 @@ and an idle stretch appears as empty windows rather than a gap in the series.
 
 ## `GET /api/processes`
 
-Every process this daemon has seen since it started, newest first. A process
+Every stream this daemon has seen since it started, newest first. A stream
 that disconnects stays listed with `ended_unix_ms` set.
+
+An `id` is `{pid}-{started_unix_ms}-{source}` and is opaque: read it, pass it
+back, do not parse it. The source is part of it because two emitters watching
+one OS process agree on the pid and can agree on the start millisecond too, and
+folding their frames into one history corrupts every call total. `GET
+/api/sessions` is what puts the two back together.
 
 ```json
 {
   "processes": [
     {
-      "id": "3218-1700000000000",
+      "id": "3218-1700000000000-lightwatch-probe",
       "app": "lightphotos",
       "pid": 3218,
       "source": "lightwatch-probe",
@@ -178,8 +184,8 @@ flushed when the process disconnects. Windows that stayed empty are not pushed.
 `404` before the upgrade if the id is unknown.
 
 ```json
-{ "type": "window", "process_id": "3218-1700000000000", "window": { "...": "the same window object as in a snapshot" } }
-{ "type": "process_ended", "process_id": "3218-1700000000000", "ended_unix_ms": 1789925695446 }
+{ "type": "window", "process_id": "3218-1700000000000-lightwatch-probe", "window": { "...": "the same window object as in a snapshot" } }
+{ "type": "process_ended", "process_id": "3218-1700000000000-lightwatch-probe", "ended_unix_ms": 1789925695446 }
 ```
 
 Fetch a snapshot first and then subscribe. A client that falls more than 256
@@ -206,7 +212,7 @@ never stored; ingest knows nothing about it.
       "pid": 64376,
       "connected": true,
       "cpu": {
-        "process_id": "64376-1790000000137",
+        "process_id": "64376-1790000000137-lightwatch-hotpath",
         "feed": "cpu",
         "source": "lightwatch-hotpath",
         "started_unix_ms": 1790000000137,
@@ -239,8 +245,8 @@ one it came from. Otherwise identical to the per-process stream. `404` before
 the upgrade if the id names no session.
 
 ```json
-{ "type": "window", "session_id": "lightphotos-64376-1790000000000", "feed": "cpu", "process_id": "64376-1790000000137", "window": { "...": "as in a snapshot" } }
-{ "type": "window", "session_id": "lightphotos-64376-1790000000000", "feed": "memory", "process_id": "64376-1790000000000", "window": { "...": "as in a snapshot" } }
+{ "type": "window", "session_id": "lightphotos-64376-1790000000000", "feed": "cpu", "process_id": "64376-1790000000137-lightwatch-hotpath", "window": { "...": "as in a snapshot" } }
+{ "type": "window", "session_id": "lightphotos-64376-1790000000000", "feed": "memory", "process_id": "64376-1790000000000-lightwatch-probe", "window": { "...": "as in a snapshot" } }
 ```
 
 There is no `/api/sessions/{id}/snapshot`. A session names its process ids and

@@ -1,11 +1,10 @@
 //! One running program, seen through however many emitters are pointed at it.
 //!
-//! A target instrumented for both halves is two processes as far as [`store`]
-//! is concerned: the probe inside it announces one `started_unix_ms`, and a
-//! bridge standing outside it announces another, because the two compute that
-//! field by different arithmetic. Merging them at ingest would mean
-//! interleaving two independent `seq` counters into one ring, which is exactly
-//! the accounting the store's missed-frame detection depends on.
+//! A target instrumented for both halves is two streams as far as [`store`] is
+//! concerned, and has to stay that way: each emitter counts `seq` from its own
+//! zero, and interleaving the two into one ring is what the store's
+//! missed-frame accounting cannot survive. [`crate::store::ProcessId`] carries
+//! the source for that reason.
 //!
 //! So nothing here is stored. [`pair_sessions`] is a pure fold over the
 //! registry, recomputed per request, and the registry stays the only thing
@@ -242,7 +241,7 @@ mod tests {
             ("lightphotos", PROBE, 64376, 1_790_000_000_000),
             ("lightphotos", BRIDGE, 64376, 1_790_000_000_137),
         ]);
-        registry.disconnect(&ProcessId::of(64376, 1_790_000_000_137));
+        registry.disconnect(&ProcessId::of(64376, 1_790_000_000_137, BRIDGE));
         registry.connect(&Hello::new("lightphotos", BRIDGE, 64376, 1_790_000_000_152));
 
         let sessions = pair_sessions(&registry);
