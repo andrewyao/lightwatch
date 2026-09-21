@@ -186,6 +186,70 @@ Fetch a snapshot first and then subscribe. A client that falls more than 256
 windows behind loses the ones in between and the daemon logs it; the next
 snapshot is the way back to a correct picture.
 
+## `GET /api/sessions`
+
+One entry per running program rather than per emitter. A target instrumented
+for both halves connects twice, once from the probe inside it and once from a
+bridge outside it, and the two report `started_unix_ms` computed by different
+arithmetic, so they are two processes to `/api/processes` and one session here.
+
+The join is on `(app, pid)`, within ten seconds of start time so that a pid the
+OS handed out again is a separate session. It is recomputed per request and
+never stored; ingest knows nothing about it.
+
+```json
+{
+  "sessions": [
+    {
+      "id": "lightphotos-64376-1790000000000",
+      "app": "lightphotos",
+      "pid": 64376,
+      "connected": true,
+      "cpu": {
+        "process_id": "64376-1790000000137",
+        "feed": "cpu",
+        "source": "lightwatch-hotpath",
+        "started_unix_ms": 1790000000137,
+        "ended_unix_ms": null,
+        "connected": true,
+        "last_frame_unix_ms": 1790000012044
+      },
+      "memory": { "...": "the same shape, feed \"memory\", source \"lightwatch-probe\"" },
+      "superseded": []
+    }
+  ]
+}
+```
+
+`cpu` and `memory` each name a `process_id` that
+`/api/processes/{id}/snapshot` accepts, which is where a client gets its first
+picture. Either may be `null`: half a picture is what there is until both
+emitters are running.
+
+`superseded` holds entries that matched this session and lost to a better one
+of their own feed. A bridge restarted against a target that never died leaves
+one behind, because its start estimate is `now - elapsed` and that drifts
+between runs. The connected entry wins, then the newest one; the loser is
+reported here rather than discarded, so nothing looks arbitrary.
+
+## `GET /api/sessions/{id}/stream`
+
+Both of the session's feeds down one WebSocket, each message tagged with which
+one it came from. Otherwise identical to the per-process stream. `404` before
+the upgrade if the id names no session.
+
+```json
+{ "type": "window", "session_id": "lightphotos-64376-1790000000000", "feed": "cpu", "process_id": "64376-1790000000137", "window": { "...": "as in a snapshot" } }
+{ "type": "window", "session_id": "lightphotos-64376-1790000000000", "feed": "memory", "process_id": "64376-1790000000000", "window": { "...": "as in a snapshot" } }
+```
+
+There is no `/api/sessions/{id}/snapshot`. A session names its process ids and
+each one already has a snapshot, so a second route would only be the two of
+them concatenated.
+
+A feed that connects after the socket is open does not join it. Re-read
+`/api/sessions` and reconnect when a session gains its other half.
+
 ## `GET /`
 
 Serves the web UI bundle embedded from `crates/lightwatch-daemon/web/`. While

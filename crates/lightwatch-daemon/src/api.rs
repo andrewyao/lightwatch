@@ -6,6 +6,7 @@ use lightwatch_proto::bucket_range;
 use serde::Serialize;
 
 use crate::ring::{CensusReading, Window};
+use crate::session::{Feed, Member, Session};
 use crate::store::{Counts, ProcessId, ProcessState, Update};
 
 /// How much of the recent past a per-second rate is averaged over.
@@ -160,6 +161,47 @@ pub enum StreamMessage {
     ProcessEnded { process_id: String, ended_unix_ms: u64 },
 }
 
+#[derive(Debug, Serialize)]
+pub struct SessionList {
+    pub sessions: Vec<SessionJson>,
+}
+
+/// One program, and the emitters watching it. `cpu` and `memory` each name a
+/// process id the existing `/api/processes/{id}/snapshot` route accepts.
+#[derive(Debug, Serialize)]
+pub struct SessionJson {
+    pub id: String,
+    pub app: String,
+    pub pid: u32,
+    pub connected: bool,
+    pub cpu: Option<MemberJson>,
+    pub memory: Option<MemberJson>,
+    /// Entries that matched this session and lost to a better one of their own
+    /// feed. Usually a bridge restarted against a target that never died.
+    pub superseded: Vec<MemberJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemberJson {
+    pub process_id: String,
+    pub feed: &'static str,
+    pub source: String,
+    pub started_unix_ms: u64,
+    pub ended_unix_ms: Option<u64>,
+    pub connected: bool,
+    pub last_frame_unix_ms: Option<u64>,
+}
+
+/// A stream message with the feed it came from, since one session's socket
+/// carries both.
+#[derive(Debug, Serialize)]
+pub struct SessionStreamMessage {
+    pub session_id: String,
+    pub feed: &'static str,
+    #[serde(flatten)]
+    pub message: StreamMessage,
+}
+
 pub fn summary(process: &ProcessState) -> ProcessSummary {
     ProcessSummary {
         id: process.id.to_string(),
@@ -253,6 +295,47 @@ pub fn snapshot(process: &ProcessState, taken_unix_ms: u64) -> Snapshot {
         types,
         edges,
         windows: process.fine.iter().map(window).collect(),
+    }
+}
+
+pub fn session_list(sessions: Vec<Session>) -> SessionList {
+    SessionList { sessions: sessions.into_iter().map(session).collect() }
+}
+
+pub fn session(source: Session) -> SessionJson {
+    SessionJson {
+        id: source.id.clone(),
+        connected: source.is_connected(),
+        app: source.app,
+        pid: source.pid,
+        cpu: source.cpu.map(member),
+        memory: source.memory.map(member),
+        superseded: source.superseded.into_iter().map(member).collect(),
+    }
+}
+
+fn member(source: Member) -> MemberJson {
+    MemberJson {
+        process_id: source.process_id.to_string(),
+        feed: source.feed.as_str(),
+        source: source.source,
+        started_unix_ms: source.started_unix_ms,
+        ended_unix_ms: source.ended_unix_ms,
+        connected: source.connected,
+        last_frame_unix_ms: source.last_frame_unix_ms,
+    }
+}
+
+pub fn session_stream_message(
+    session_id: &str,
+    feed: Feed,
+    process_id: &ProcessId,
+    update: &Update,
+) -> SessionStreamMessage {
+    SessionStreamMessage {
+        session_id: session_id.to_string(),
+        feed: feed.as_str(),
+        message: stream_message(process_id, update),
     }
 }
 
