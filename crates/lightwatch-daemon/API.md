@@ -258,10 +258,15 @@ A feed that connects after the socket is open does not join it. Re-read
 
 ## `GET /`
 
-Serves the web UI bundle embedded from `crates/lightwatch-daemon/web/`. While
-that directory holds no `index.html` the daemon answers `200` with a plain-text
-page naming these routes. Any path that the bundle does not contain falls
-through to its `index.html`, so a single-page UI keeps its own routing.
+Serves the web UI embedded from `crates/lightwatch-daemon/web/`: live CPU per
+function and live census per type for one session, driven by
+`/api/sessions/{id}/stream` and falling back to snapshot polling whenever that
+socket is down. Plain ES modules, no build step, but `include_dir!` reads the
+directory at compile time, so an edit under `web/` needs a rebuild to be served.
+
+Any path the bundle does not contain falls through to its `index.html`, so a
+single-page UI keeps its own routing. A build whose `web/` holds no
+`index.html` answers `200` with a plain-text page naming these routes instead.
 
 ## Refusals at the boundary
 

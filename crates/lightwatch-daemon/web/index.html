@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>lightwatch</title>
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <h1>lightwatch</h1>
+      <label class="picker">
+        <span>session</span>
+        <select id="sessions"></select>
+      </label>
+      <p id="link" class="link" data-state="connecting">connecting</p>
+    </header>
+
+    <p id="detail" class="detail"></p>
+
+    <main>
+      <section class="panel">
+        <h2>CPU</h2>
+        <p class="note" id="cpu-note"></p>
+        <ol class="rows" id="cpu"></ol>
+      </section>
+
+      <section class="panel">
+        <h2>Memory</h2>
+        <p class="note" id="memory-note"></p>
+        <ol class="rows" id="memory"></ol>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        <strong>Live counts are exact.</strong> Bytes are approximate: the probe
+        sums the midpoint of each size bucket, which measured about 3% high.
+      </p>
+      <p>
+        No call graph here. Neither feed carries edges, so there is nothing to
+        draw one from.
+      </p>
+    </footer>
+  </body>
+</html>
