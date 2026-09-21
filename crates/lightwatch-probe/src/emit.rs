@@ -10,16 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lightwatch_proto::{Event, Frame, Hello, Message, DEFAULT_WINDOW_MS};
+use lightwatch_proto::{Event, Frame, Hello, Message, DEFAULT_WINDOW_MS, SOCKET_FILE};
 
 use crate::calls;
 use crate::census::bytes_from_buckets;
 use crate::registry;
 
 pub(crate) const SOURCE: &str = "lightwatch-probe";
-
-/// The socket the probe connects to when nothing points it elsewhere.
-const DEFAULT_SOCKET_NAME: &str = "lightwatch.sock";
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -166,12 +163,11 @@ impl Emitter {
 /// `LIGHTWATCH_SOCK` names one socket exactly. Otherwise the directory holds
 /// `lightwatch.sock` by convention, and any other socket in it is tried after
 /// that so a daemon listening under a different name is still found.
-pub(crate) fn candidate_sockets(dir: Option<&Path>, explicit: Option<&str>) -> Vec<PathBuf> {
+pub(crate) fn candidate_sockets(dir: &Path, explicit: Option<&str>) -> Vec<PathBuf> {
     if let Some(path) = explicit {
         return vec![PathBuf::from(path)];
     }
-    let Some(dir) = dir else { return Vec::new() };
-    let mut candidates = vec![dir.join(DEFAULT_SOCKET_NAME)];
+    let mut candidates = vec![dir.join(SOCKET_FILE)];
     if let Ok(entries) = std::fs::read_dir(dir) {
         let mut others: Vec<PathBuf> = entries
             .flatten()
@@ -186,35 +182,11 @@ pub(crate) fn candidate_sockets(dir: Option<&Path>, explicit: Option<&str>) -> V
     candidates
 }
 
-/// `$LIGHTWATCH_SOCK_DIR`, else `$TMPDIR/lightwatch` on macOS, else
-/// `$XDG_RUNTIME_DIR/lightwatch`. Takes the environment as arguments so the
-/// rule is testable without mutating a process-wide variable.
-pub(crate) fn socket_dir(
-    sock_dir: Option<&str>,
-    tmpdir: Option<&str>,
-    xdg_runtime_dir: Option<&str>,
-    is_macos: bool,
-) -> Option<PathBuf> {
-    if let Some(dir) = sock_dir {
-        return Some(PathBuf::from(dir));
-    }
-    if is_macos {
-        if let Some(tmp) = tmpdir {
-            return Some(Path::new(tmp).join("lightwatch"));
-        }
-    }
-    xdg_runtime_dir.map(|runtime| Path::new(runtime).join("lightwatch"))
-}
-
 fn configured_sockets() -> Vec<PathBuf> {
-    let env = |key: &str| std::env::var(key).ok();
-    let dir = socket_dir(
-        env("LIGHTWATCH_SOCK_DIR").as_deref(),
-        env("TMPDIR").as_deref(),
-        env("XDG_RUNTIME_DIR").as_deref(),
-        cfg!(target_os = "macos"),
-    );
-    candidate_sockets(dir.as_deref(), env("LIGHTWATCH_SOCK").as_deref())
+    candidate_sockets(
+        &lightwatch_proto::socket_dir(),
+        std::env::var("LIGHTWATCH_SOCK").ok().as_deref(),
+    )
 }
 
 #[cfg(unix)]
@@ -261,39 +233,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_explicit_socket_dir_wins_over_every_fallback() {
-        assert_eq!(
-            socket_dir(Some("/run/lw"), Some("/tmp"), Some("/run/user/1"), true),
-            Some(PathBuf::from("/run/lw"))
-        );
-    }
-
-    #[test]
-    fn macos_falls_back_to_tmpdir() {
-        assert_eq!(
-            socket_dir(None, Some("/var/folders/x/T/"), Some("/run/user/1"), true),
-            Some(PathBuf::from("/var/folders/x/T/lightwatch"))
-        );
-    }
-
-    #[test]
-    fn elsewhere_falls_back_to_the_xdg_runtime_dir_not_tmpdir() {
-        assert_eq!(
-            socket_dir(None, Some("/tmp"), Some("/run/user/1000"), false),
-            Some(PathBuf::from("/run/user/1000/lightwatch"))
-        );
-    }
-
-    #[test]
-    fn nothing_configured_means_nowhere_to_connect() {
-        assert_eq!(socket_dir(None, None, None, false), None);
-        assert!(candidate_sockets(None, None).is_empty());
-    }
-
-    #[test]
     fn an_explicit_socket_path_is_the_only_candidate() {
         assert_eq!(
-            candidate_sockets(Some(Path::new("/run/lw")), Some("/run/other.sock")),
+            candidate_sockets(Path::new("/run/lw"), Some("/run/other.sock")),
             vec![PathBuf::from("/run/other.sock")]
         );
     }
@@ -304,8 +246,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(dir.join("zzz.sock"), b"").expect("decoy socket file");
-        let found = candidate_sockets(Some(&dir), None);
-        assert_eq!(found[0], dir.join(DEFAULT_SOCKET_NAME));
+        let found = candidate_sockets(&dir, None);
+        assert_eq!(found[0], dir.join(SOCKET_FILE));
         assert!(found.contains(&dir.join("zzz.sock")), "other sockets stay reachable");
         let _ = std::fs::remove_dir_all(&dir);
     }

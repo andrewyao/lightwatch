@@ -2,6 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use lightwatch_daemon::{ingest, server, store::Registry};
+use lightwatch_proto::{socket_dir, SOCKET_FILE};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -15,7 +16,7 @@ async fn main() -> std::process::ExitCode {
 
     let registry = Arc::new(Registry::new());
 
-    let dir = ingest::socket_dir();
+    let dir = socket_dir();
     let listener = match ingest::bind(&dir) {
         Ok(listener) => listener,
         Err(err) => {
@@ -23,7 +24,7 @@ async fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    info!(socket = %dir.join(ingest::SOCKET_FILE).display(), "accepting emitters");
+    info!(socket = %dir.join(SOCKET_FILE).display(), "accepting emitters");
 
     // Loopback only: this is a developer tool and the streams it holds are a
     // program's internals.
@@ -46,6 +47,6 @@ async fn main() -> std::process::ExitCode {
     info!("shutting down");
     accepting.abort();
     serving.abort();
-    let _ = std::fs::remove_file(dir.join(ingest::SOCKET_FILE));
+    let _ = std::fs::remove_file(dir.join(SOCKET_FILE));
     std::process::ExitCode::SUCCESS
 }
