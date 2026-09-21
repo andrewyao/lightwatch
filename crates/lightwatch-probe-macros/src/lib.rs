@@ -101,7 +101,11 @@ fn expand_measure(function: ItemFn, name_override: Option<LitStr>) -> TokenStrea
 /// Counts live instances of a struct and their sizes.
 ///
 /// Injects a private census field, so an instance is built through the
-/// generated `new_tracked` constructor rather than a struct literal.
+/// generated `new_tracked` constructor rather than a struct literal. The
+/// constructor takes a generated `{Ident}Fields` struct rather than a
+/// parameter per field: converting a literal then keeps every field written
+/// by name, and two same-typed neighbours like `width` and `height` cannot
+/// swap on the way through.
 ///
 /// Pass `manual_measured` when the type implements
 /// `lightwatch::Measured` itself, which any type owning a heap buffer should.
@@ -143,28 +147,37 @@ fn expand_track(
     let vis = item.vis.clone();
     let name = LitStr::new(&ident.to_string(), ident.span());
     let census_field = format_ident!("__lightwatch_census");
+    let fields_ident = format_ident!("{ident}Fields");
+    let fields_doc = LitStr::new(
+        &format!("Every field of [`{ident}`] except the census one."),
+        ident.span(),
+    );
 
-    let parameters: Vec<(syn::Ident, syn::Type)> = {
+    // Read before the census field is pushed, so the companion carries the
+    // author's fields and not the one the attribute adds.
+    let declared: Vec<syn::Field> = {
         let syn::Fields::Named(fields) = &mut item.fields else {
             return Err(syn::Error::new_spanned(
                 &item,
                 "lightwatch can only track a struct with named fields, because it injects one.",
             ));
         };
-        let parameters = fields
-            .named
-            .iter()
-            .map(|field| (field.ident.clone().expect("named fields"), field.ty.clone()))
-            .collect();
+        let declared = fields.named.iter().cloned().collect();
         fields.named.push(syn::Field::parse_named.parse2(quote! {
             #[doc(hidden)]
             #[allow(dead_code)]
             #census_field: #probe::Census<#ident>
         })?);
-        parameters
+        declared
     };
-    let parameter_names = parameters.iter().map(|(ident, _)| ident);
-    let parameter_list = parameters.iter().map(|(ident, ty)| quote!(#ident: #ty));
+    let declarations = declared.iter().map(|field| {
+        let (vis, name, ty) = (&field.vis, &field.ident, &field.ty);
+        quote!(#vis #name: #ty)
+    });
+    let names: Vec<&syn::Ident> = declared
+        .iter()
+        .map(|field| field.ident.as_ref().expect("named fields"))
+        .collect();
 
     let measured = (!manual_measured).then(|| {
         quote! {
@@ -179,6 +192,11 @@ fn expand_track(
 
     Ok(quote! {
         #item
+
+        #[doc = #fields_doc]
+        #vis struct #fields_ident {
+            #(#declarations,)*
+        }
 
         impl #probe::Tracked for #ident {
             fn slot() -> &'static #probe::TypeSlot {
@@ -196,10 +214,10 @@ fn expand_track(
             /// size it records is this instance's real
             /// `lightwatch::Measured::bytes`, heap included.
             #[allow(dead_code)]
-            #[allow(clippy::too_many_arguments)]
-            #vis fn new_tracked(#(#parameter_list),*) -> Self {
+            #vis fn new_tracked(fields: #fields_ident) -> Self {
+                let #fields_ident { #(#names,)* } = fields;
                 let mut value = #ident {
-                    #(#parameter_names,)*
+                    #(#names,)*
                     #census_field: #probe::Census::UNCOUNTED,
                 };
                 let counted = #probe::Census::measuring(&value);

@@ -14,7 +14,10 @@
 //!
 //! #[lightwatch::measure]
 //! fn decode(bytes: &[u8]) -> Vec<Pixel> {
-//!     bytes.chunks(4).map(|c| Pixel::new_tracked([c[0], c[1], c[2], 255])).collect()
+//!     bytes
+//!         .chunks(4)
+//!         .map(|c| Pixel::new_tracked(PixelFields { rgba: [c[0], c[1], c[2], 255] }))
+//!         .collect()
 //! }
 //!
 //! lightwatch::start_named("my-app");
@@ -45,7 +48,7 @@
 //! }
 //!
 //! # #[cfg(feature = "enabled")] {
-//! let thumbnail = Thumbnail::new_tracked(Vec::with_capacity(4096));
+//! let thumbnail = Thumbnail::new_tracked(ThumbnailFields { pixels: Vec::with_capacity(4096) });
 //! assert_eq!(lightwatch::testing::live("Thumbnail"), 1);
 //! assert!(lightwatch::testing::bytes("Thumbnail") >= 4096, "the heap buffer is counted");
 //! drop(thumbnail);

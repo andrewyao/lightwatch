@@ -122,13 +122,15 @@ impl lightwatch::Measured for Thumbnail {
 
 #[measure]
 pub fn build_tags(count: usize) -> Vec<Tag> {
-    (0..count).map(|index| Tag::new_tracked(index as u32, 1)).collect()
+    (0..count)
+        .map(|index| Tag::new_tracked(TagFields { id: index as u32, weight: 1 }))
+        .collect()
 }
 
 #[measure]
 pub fn build_thumbnails(count: usize, pixel_bytes: usize) -> Vec<Thumbnail> {
     (0..count)
-        .map(|_| Thumbnail::new_tracked(vec![0u8; pixel_bytes]))
+        .map(|_| Thumbnail::new_tracked(ThumbnailFields { pixels: vec![0u8; pixel_bytes] }))
         .collect()
 }
 
