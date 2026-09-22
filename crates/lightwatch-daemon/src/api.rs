@@ -414,7 +414,7 @@ fn per_sec(total: u64, covered_secs: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::store::Registry;
-    use lightwatch_proto::{Dist, Event, Frame, FunctionId, Hello, Register, TypeId};
+    use lightwatch_proto::{Dist, Event, Frame, FunctionId, Hello, PathId, Register, TypeId};
 
     fn process_with_traffic() -> std::sync::Arc<std::sync::RwLock<ProcessState>> {
         let registry = Registry::new();
@@ -437,6 +437,8 @@ mod tests {
                     location: None,
                 },
                 Register::Type { id: TypeId(1), name: "Thumbnail".into(), location: None },
+                Register::Path { id: PathId(1), parent: PathId(0), func: FunctionId(1) },
+                Register::Path { id: PathId(2), parent: PathId(1), func: FunctionId(2) },
             ],
             events: vec![],
         });
@@ -451,7 +453,8 @@ mod tests {
                         count: 4,
                         ns: Dist::Raw { v: vec![1_000_000; 4] },
                     },
-                    Event::Edge { from: FunctionId(1), to: FunctionId(2), count: 4 },
+                    Event::Stack { path: PathId(2), count: 4, self_ns: 600_000 },
+                    Event::Stack { path: PathId(1), count: 4, self_ns: 400_000 },
                     Event::Census {
                         ty: TypeId(1),
                         live: window,

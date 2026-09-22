@@ -254,6 +254,15 @@ impl ProcessState {
         }
     }
 
+    /// The function that reaches `node`, or `None` when `node` is a root and
+    /// nothing measured called it.
+    fn caller_of(&self, node: PathNode) -> Option<FunctionId> {
+        if node.parent.0 == 0 {
+            return None;
+        }
+        self.paths.get(&node.parent).map(|parent| parent.func)
+    }
+
     /// The fine window that this frame's arrival puts out of reach, if any.
     fn close_open_window_before(&mut self, t_ns: u64) -> Option<Window> {
         let index = self.fine.index_of(t_ns);
@@ -291,14 +300,11 @@ impl ProcessState {
                     }
                     applied.push(Applied::Calls { func: *func, calls: *count, ns: elapsed });
                 }
-                Event::Edge { from, to, count } => {
-                    if !self.functions.contains_key(from) || !self.functions.contains_key(to) {
-                        self.counts.unknown_id += 1;
-                        continue;
-                    }
-                    self.edges.entry((*from, *to)).or_default().accumulate(*count);
-                    applied.push(Applied::Edge { from: *from, to: *to, calls: *count });
-                }
+                // Superseded by the call tree, which says the same thing and
+                // also says through which chain of callers. Ignored rather
+                // than counted against the feed: an emitter that still sends
+                // both is not malformed, it is a version behind.
+                Event::Edge { .. } => {}
                 Event::Stack { path, count, self_ns } => {
                     let Some(node) = self.paths.get(path).copied() else {
                         self.counts.unknown_id += 1;
@@ -315,6 +321,19 @@ impl ProcessState {
                         calls: *count,
                         self_ns: *self_ns,
                     });
+
+                    // The edge this context stands for. A context knows both
+                    // ends of it, so the graph is a reading of the tree
+                    // rather than a second set of counters that could
+                    // disagree with it.
+                    if let Some(caller) = self.caller_of(node) {
+                        self.edges.entry((caller, node.func)).or_default().accumulate(*count);
+                        applied.push(Applied::Edge {
+                            from: caller,
+                            to: node.func,
+                            calls: *count,
+                        });
+                    }
                 }
                 Event::Census { ty, live, bytes, sizes } => {
                     let reading = CensusReading {
@@ -464,6 +483,7 @@ impl Registry {
 mod tests {
     use super::*;
     use lightwatch_proto::SCHEMA_VERSION;
+    use std::collections::BTreeSet;
 
     fn hello() -> Hello {
         Hello::new("demo", "test", 4242, 1_700_000_000_000)
@@ -663,7 +683,7 @@ mod tests {
             registers: vec![],
             events: vec![
                 Event::Calls { func: FunctionId(99), count: 5, ns: Dist::empty() },
-                Event::Edge { from: FunctionId(1), to: FunctionId(98), count: 5 },
+                Event::Stack { path: PathId(98), count: 5, self_ns: 500 },
                 Event::Census { ty: TypeId(97), live: 1, bytes: 1, sizes: Dist::empty() },
             ],
         });
@@ -672,7 +692,85 @@ mod tests {
         assert_eq!(process.counts.events, 3);
         assert!(!process.functions.contains_key(&FunctionId(99)), "an unknown id is never invented");
         assert!(process.edges.is_empty());
+        assert!(process.path_totals.is_empty());
         assert!(process.fine.get(1).is_none_or(|w| w.is_empty()), "a dropped event reaches no window");
+    }
+
+    #[test]
+    fn the_edge_map_is_read_off_the_call_tree_and_says_what_an_edge_event_used_to() {
+        // The demo app's documented graph, as contexts:
+        //   a -> b -> c, pipeline -> {Decode::run -> c, Encode::run},
+        //   render -> paint, descend -> descend.
+        let names = ["a", "b", "c", "pipeline", "Decode::run", "Encode::run", "render", "paint", "descend"];
+        let tree = [
+            (1u32, 0u32, 1u32), // a
+            (2, 1, 2),          // a > b
+            (3, 2, 3),          // a > b > c
+            (4, 0, 4),          // pipeline
+            (5, 4, 5),          // pipeline > Decode::run
+            (6, 5, 3),          // pipeline > Decode::run > c
+            (7, 4, 6),          // pipeline > Encode::run
+            (8, 0, 7),          // render
+            (9, 8, 8),          // render > paint (blit is not measured)
+            (10, 0, 9),         // descend
+            (11, 10, 9),        // descend > descend, one node however deep
+        ];
+
+        let registry = Registry::new();
+        let state = registry.connect(&hello());
+        let mut process = state.write().unwrap();
+        process.apply_frame(&Frame {
+            seq: 0,
+            t_ns: 0,
+            registers: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| Register::Function {
+                    id: FunctionId(index as u32 + 1),
+                    name: (*name).into(),
+                    module: None,
+                    location: None,
+                })
+                .chain(tree.iter().map(|(id, parent, func)| Register::Path {
+                    id: PathId(*id),
+                    parent: PathId(*parent),
+                    func: FunctionId(*func),
+                }))
+                .collect(),
+            events: tree
+                .iter()
+                .map(|(id, _, _)| Event::Stack { path: PathId(*id), count: 3, self_ns: 1_000 })
+                .collect(),
+        });
+
+        let named: BTreeSet<(&str, &str)> = process
+            .edges
+            .keys()
+            .map(|(from, to)| {
+                (names[from.0 as usize - 1], names[to.0 as usize - 1])
+            })
+            .collect();
+        assert_eq!(
+            named,
+            BTreeSet::from([
+                ("a", "b"),
+                ("b", "c"),
+                ("pipeline", "Decode::run"),
+                ("pipeline", "Encode::run"),
+                ("Decode::run", "c"),
+                ("render", "paint"),
+                ("descend", "descend"),
+            ])
+        );
+        assert_eq!(
+            process.edges[&(FunctionId(1), FunctionId(2))].get(),
+            3,
+            "an edge's weight is how often its context was entered"
+        );
+        assert!(
+            !named.iter().any(|(from, _)| *from == "blit"),
+            "an unmeasured frame has no context, so it can have no edge"
+        );
     }
 
     #[test]
