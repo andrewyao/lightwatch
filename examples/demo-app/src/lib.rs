@@ -145,5 +145,5 @@ pub fn one_round() -> u64 {
     a().wrapping_add(pipeline(&stages()))
         .wrapping_add(render())
         .wrapping_add(descend(4))
-        .wrapping_add(import::run(3, 256))
+        .wrapping_add(import::run(6, 1024))
 }

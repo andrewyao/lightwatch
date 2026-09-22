@@ -101,10 +101,7 @@ select {
 }
 
 main {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-  gap: 20px;
-  align-items: start;
+  display: block;
 }
 
 .panel {
@@ -136,71 +133,6 @@ h2 {
   font-size: 12px;
 }
 
-.rows {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-}
-
-.rows li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px;
-  gap: 4px 14px;
-  padding: 7px 0;
-  border-top: 1px solid var(--line);
-}
-
-.rows li:first-child {
-  border-top: 0;
-}
-
-.name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.value {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.second {
-  color: var(--dim);
-}
-
-.track {
-  grid-column: 1 / -1;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--track);
-  overflow: hidden;
-}
-
-.fill {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  transition: width 180ms linear;
-}
-
-#cpu .fill {
-  background: var(--cpu);
-}
-
-#memory .fill {
-  background: var(--memory);
-}
-
-.empty {
-  padding: 8px 0;
-  color: var(--dim);
-  border: 0;
-  display: block;
-}
-
 footer {
   margin-top: 26px;
   padding-top: 14px;
@@ -217,4 +149,226 @@ footer p {
 footer strong {
   color: var(--text);
   font-weight: 600;
+}
+
+
+/* ---- tabs ---- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 16px 0 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 14px;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--cpu);
+}
+
+.toggle {
+  appearance: none;
+  background: var(--track);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--dim);
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 12px;
+}
+
+.toggle[data-on="true"] {
+  background: color-mix(in srgb, var(--good) 20%, var(--panel));
+  border-color: var(--good);
+  color: var(--good);
+}
+
+/* ---- panels and plots ---- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  border-top-left-radius: 0;
+  padding: 16px 18px 18px;
+}
+
+.panel .head {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.panel .head:first-child {
+  margin-top: 0;
+}
+
+.panel h2 {
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.plot {
+  margin-top: 8px;
+  position: relative;
+}
+
+.plot.grow {
+  height: 620px;
+}
+
+.plot canvas {
+  display: block;
+  width: 100%;
+}
+
+.plot.grow canvas {
+  height: 100%;
+}
+
+.axis .strip-label {
+  color: var(--dim);
+  font-size: 11px;
+  margin: 10px 0 3px;
+}
+
+.ruler {
+  color: var(--dim);
+  display: flex;
+  font-size: 11px;
+  justify-content: space-between;
+  margin: 4px 0 0;
+}
+
+/* ---- legend: identity is never colour alone ---- */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+}
+
+.legend li {
+  align-items: center;
+  color: var(--dim);
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.legend .swatch {
+  border-radius: 2px;
+  height: 10px;
+  width: 10px;
+}
+
+/* ---- the table view a chart always owes ---- */
+
+.table {
+  margin-top: 14px;
+}
+
+.table summary {
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.table table {
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 8px;
+  width: 100%;
+}
+
+.table th,
+.table td {
+  border-bottom: 1px solid var(--line);
+  padding: 4px 8px 4px 0;
+  text-align: left;
+}
+
+.table th {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+.table td.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.table .chain {
+  color: var(--dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---- hover ---- */
+
+.tip {
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  left: 0;
+  max-width: 460px;
+  padding: 8px 10px;
+  pointer-events: none;
+  position: fixed;
+  top: 0;
+  z-index: 10;
+}
+
+.tip dl {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 1px 12px;
+  margin: 6px 0 0;
+}
+
+.tip dt {
+  color: var(--dim);
+}
+
+.tip dd {
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+  text-align: right;
+}
+
+.tip .chain {
+  color: var(--dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.tip .head {
+  font-weight: 600;
+}
+
+/* The axis both tabs read from, so it sits above them rather than inside
+   one of them. */
+.axis-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-top: 6px;
+  padding: 14px 18px 16px;
 }

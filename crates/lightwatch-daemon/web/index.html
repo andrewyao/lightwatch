@@ -14,34 +14,82 @@
         <span>session</span>
         <select id="sessions"></select>
       </label>
+      <label class="picker">
+        <span>bucket</span>
+        <select id="granularity"></select>
+      </label>
+      <label class="picker">
+        <span>span</span>
+        <select id="resolution">
+          <option value="fine">1 minute</option>
+          <option value="coarse">15 minutes</option>
+        </select>
+      </label>
+      <button id="live" class="toggle" data-on="true">live</button>
       <p id="link" class="link" data-state="connecting">connecting</p>
     </header>
 
     <p id="detail" class="detail"></p>
 
+    <section class="axis-panel">
+      <div class="head">
+        <h2>Timeline</h2>
+        <p class="note" id="axis-note"></p>
+      </div>
+      <div class="plot axis">
+        <p class="strip-label">cpu · self time by module</p>
+        <canvas id="cpu-strip"></canvas>
+        <p class="strip-label">memory · live bytes by type</p>
+        <canvas id="memory-strip"></canvas>
+        <p class="ruler"><span id="axis-start"></span><span id="axis-end"></span></p>
+      </div>
+      <ul class="legend" id="legend"></ul>
+    </section>
+
+    <nav class="tabs" role="tablist">
+      <button id="tab-resources" class="tab" role="tab" aria-selected="true" aria-controls="panel-resources">CPU &amp; memory</button>
+      <button id="tab-calls" class="tab" role="tab" aria-selected="false" aria-controls="panel-calls">Call graph</button>
+    </nav>
+
     <main>
-      <section class="panel">
-        <h2>CPU</h2>
-        <p class="note" id="cpu-note"></p>
-        <ol class="rows" id="cpu"></ol>
+      <section id="panel-resources" class="panel" role="tabpanel" aria-labelledby="tab-resources">
+        <div class="head">
+          <h2>CPU</h2>
+          <p class="note" id="flame-note"></p>
+        </div>
+        <div class="plot" id="flame-wrap">
+          <canvas id="flame"></canvas>
+        </div>
+
+        <details class="table">
+          <summary>the same numbers, as a table</summary>
+          <div id="flame-table"></div>
+        </details>
       </section>
 
-      <section class="panel">
-        <h2>Memory</h2>
-        <p class="note" id="memory-note"></p>
-        <ol class="rows" id="memory"></ol>
+      <section id="panel-calls" class="panel" role="tabpanel" aria-labelledby="tab-calls" hidden>
+        <div class="head">
+          <h2>Call graph</h2>
+          <p class="note" id="graph-note"></p>
+        </div>
+        <div class="plot grow">
+          <canvas id="graph"></canvas>
+        </div>
+        <details class="table">
+          <summary>every call that was made, as a table</summary>
+          <div id="graph-table"></div>
+        </details>
       </section>
     </main>
+
+    <div id="tip" class="tip" hidden></div>
 
     <footer>
       <p>
         <strong>Live counts are exact.</strong> Bytes are approximate: the probe
         sums the midpoint of each size bucket, which measured about 3% high.
       </p>
-      <p>
-        No call graph here. Neither feed carries edges, so there is nothing to
-        draw one from.
-      </p>
+      <p id="threading" class="note"></p>
     </footer>
   </body>
 </html>
