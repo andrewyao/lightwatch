@@ -13,13 +13,14 @@
 //! the graph, not a defect to work around.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use lightwatch_proto::dist::{bucket_of, Dist, MAX_RAW_SAMPLES};
 use lightwatch_proto::FunctionId;
+
+use crate::hashing::IntMap;
 
 /// One `#[measure]`d function, as a `static` at its own definition site.
 pub struct Site {
@@ -119,7 +120,7 @@ struct Depth {
 
 struct ThreadState {
     stack: Vec<Activation>,
-    depth: HashMap<u32, Depth>,
+    depth: IntMap<u32, Depth>,
     slot: Arc<ThreadSlot>,
 }
 
@@ -185,7 +186,7 @@ static THREADS: Mutex<Vec<Arc<ThreadSlot>>> = Mutex::new(Vec::new());
 thread_local! {
     static STATE: RefCell<ThreadState> = RefCell::new(ThreadState {
         stack: Vec::new(),
-        depth: HashMap::new(),
+        depth: IntMap::default(),
         slot: register_thread(),
     });
 }
@@ -203,8 +204,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[derive(Default, Clone)]
 pub(crate) struct Accum {
-    pub(crate) edges: HashMap<(u32, u32), u64>,
-    pub(crate) calls: HashMap<u32, CallStat>,
+    pub(crate) edges: IntMap<(u32, u32), u64>,
+    pub(crate) calls: IntMap<u32, CallStat>,
 }
 
 #[derive(Default, Clone)]
@@ -222,7 +223,7 @@ pub(crate) struct CallStat {
 #[derive(Clone)]
 pub(crate) enum Samples {
     Raw(Vec<u64>),
-    Buckets(HashMap<u16, u32>),
+    Buckets(IntMap<u16, u32>),
 }
 
 impl Default for Samples {
@@ -236,7 +237,7 @@ impl Samples {
         match self {
             Samples::Raw(values) if values.len() < MAX_RAW_SAMPLES => values.push(value),
             Samples::Raw(values) => {
-                let mut buckets: HashMap<u16, u32> = HashMap::new();
+                let mut buckets: IntMap<u16, u32> = IntMap::default();
                 for existing in values.drain(..) {
                     *buckets.entry(bucket_of(existing)).or_insert(0) += 1;
                 }
@@ -247,10 +248,10 @@ impl Samples {
         }
     }
 
-    fn into_buckets(self) -> HashMap<u16, u32> {
+    fn into_buckets(self) -> IntMap<u16, u32> {
         match self {
             Samples::Raw(values) => {
-                let mut buckets = HashMap::new();
+                let mut buckets = IntMap::default();
                 for value in values {
                     *buckets.entry(bucket_of(value)).or_insert(0) += 1;
                 }
@@ -353,7 +354,7 @@ mod tests {
 
     #[test]
     fn buckets_come_out_sorted_so_the_wire_shape_is_stable() {
-        let mut samples = Samples::Buckets(HashMap::new());
+        let mut samples = Samples::Buckets(IntMap::default());
         for value in [900u64, 4, 44_720_000, 17] {
             samples.add(value);
         }
@@ -365,9 +366,9 @@ mod tests {
 
     #[test]
     fn absorbing_a_bucketed_accumulator_keeps_every_sample() {
-        let mut left = Samples::Buckets(HashMap::new());
+        let mut left = Samples::Buckets(IntMap::default());
         left.add(100);
-        let mut right = Samples::Buckets(HashMap::new());
+        let mut right = Samples::Buckets(IntMap::default());
         right.add(100);
         right.add(200);
         left.absorb(right);

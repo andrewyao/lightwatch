@@ -94,6 +94,8 @@ pub use lightwatch_probe_macros::{measure, track};
 #[cfg(feature = "enabled")]
 mod calls;
 #[cfg(feature = "enabled")]
+mod hashing;
+#[cfg(feature = "enabled")]
 mod emit;
 #[cfg(feature = "enabled")]
 mod registry;
