@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use lightwatch_proto::{FunctionId, TypeId};
+use lightwatch_proto::{FunctionId, PathId, TypeId};
 
 use crate::quantity::{Absolute, Cumulative};
 
@@ -21,6 +21,15 @@ pub const COARSE_CAPACITY: usize = 900;
 pub struct CallDelta {
     pub calls: Cumulative,
     pub ns: Cumulative,
+}
+
+/// One calling context's share of a window. Both fields are deltas.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StackDelta {
+    pub calls: Cumulative,
+    /// Time spent in this context and outside any measured callee, so summing
+    /// a subtree gives inclusive time without counting a nanosecond twice.
+    pub self_ns: Cumulative,
 }
 
 /// One type's live-instance reading. Every field is absolute.
@@ -40,6 +49,7 @@ pub struct Window {
     pub resolution_ns: u64,
     pub calls: BTreeMap<FunctionId, CallDelta>,
     pub edges: BTreeMap<(FunctionId, FunctionId), Cumulative>,
+    pub stacks: BTreeMap<PathId, StackDelta>,
     pub census: BTreeMap<TypeId, CensusReading>,
 }
 
@@ -50,6 +60,7 @@ impl Window {
             resolution_ns,
             calls: BTreeMap::new(),
             edges: BTreeMap::new(),
+            stacks: BTreeMap::new(),
             census: BTreeMap::new(),
         }
     }
@@ -63,7 +74,10 @@ impl Window {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.edges.is_empty() && self.census.is_empty()
+        self.calls.is_empty()
+            && self.edges.is_empty()
+            && self.stacks.is_empty()
+            && self.census.is_empty()
     }
 
     pub fn add_calls(&mut self, func: FunctionId, calls: u64, ns: u64) {
@@ -74,6 +88,12 @@ impl Window {
 
     pub fn add_edge(&mut self, from: FunctionId, to: FunctionId, calls: u64) {
         self.edges.entry((from, to)).or_default().accumulate(calls);
+    }
+
+    pub fn add_stack(&mut self, path: PathId, calls: u64, self_ns: u64) {
+        let entry = self.stacks.entry(path).or_default();
+        entry.calls.accumulate(calls);
+        entry.self_ns.accumulate(self_ns);
     }
 
     pub fn record_census(&mut self, ty: TypeId, reading: CensusReading) {

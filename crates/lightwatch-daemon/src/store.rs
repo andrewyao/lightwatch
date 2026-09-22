@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lightwatch_proto::{bucket_range, Dist, Event, Frame, FunctionId, Hello, Location, Register, TypeId};
+use lightwatch_proto::{
+    bucket_range, Dist, Event, Frame, FunctionId, Hello, Location, PathId, Register, TypeId,
+};
 use tokio::sync::broadcast;
 
 use crate::quantity::{Absolute, Cumulative};
@@ -86,8 +88,26 @@ pub struct FunctionState {
     pub location: Option<Location>,
     pub calls: Cumulative,
     pub ns_total: Cumulative,
+    /// Time spent in this function and outside any measured callee, summed
+    /// over every context it was reached through. Unlike `ns_total`, adding
+    /// this across every function double-counts nothing.
+    pub self_ns_total: Cumulative,
     /// Lifetime duration histogram, bucket index to sample count.
     pub ns_buckets: BTreeMap<u16, u64>,
+}
+
+/// One node of a process's call tree: `func`, reached through `parent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathNode {
+    pub parent: PathId,
+    pub func: FunctionId,
+}
+
+/// One calling context's lifetime totals.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StackTotals {
+    pub calls: Cumulative,
+    pub self_ns: Cumulative,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -123,6 +143,11 @@ pub struct ProcessState {
     /// Kept for the whole process lifetime, never windowed. A call graph that
     /// forgets an edge the moment it stops firing flickers and is unreadable.
     pub edges: BTreeMap<(FunctionId, FunctionId), Cumulative>,
+    /// The call tree, kept for the whole process lifetime like `edges`. A
+    /// flame graph that forgot a context the moment it went quiet would
+    /// change shape under the reader between one window and the next.
+    pub paths: BTreeMap<PathId, PathNode>,
+    pub path_totals: BTreeMap<PathId, StackTotals>,
     pub fine: Ring,
     pub coarse: Ring,
     open_fine_index: Option<u64>,
@@ -147,6 +172,8 @@ impl ProcessState {
             functions: BTreeMap::new(),
             types: BTreeMap::new(),
             edges: BTreeMap::new(),
+            paths: BTreeMap::new(),
+            path_totals: BTreeMap::new(),
             fine: Ring::fine(),
             coarse: Ring::coarse(),
             open_fine_index: None,
@@ -209,6 +236,21 @@ impl ProcessState {
                 entry.name = name.clone();
                 entry.location = location.clone();
             }
+            // A context is only meaningful once both ends of it are known, so
+            // a node naming an unregistered function, or hanging off a parent
+            // this stream never introduced, is dropped rather than stored as
+            // a root it is not.
+            Register::Path { id, parent, func } => {
+                if id.0 == 0 || !self.functions.contains_key(func) {
+                    self.counts.unknown_id += 1;
+                    return;
+                }
+                if parent.0 != 0 && !self.paths.contains_key(parent) {
+                    self.counts.unknown_id += 1;
+                    return;
+                }
+                self.paths.insert(*id, PathNode { parent: *parent, func: *func });
+            }
         }
     }
 
@@ -256,6 +298,23 @@ impl ProcessState {
                     }
                     self.edges.entry((*from, *to)).or_default().accumulate(*count);
                     applied.push(Applied::Edge { from: *from, to: *to, calls: *count });
+                }
+                Event::Stack { path, count, self_ns } => {
+                    let Some(node) = self.paths.get(path).copied() else {
+                        self.counts.unknown_id += 1;
+                        continue;
+                    };
+                    let totals = self.path_totals.entry(*path).or_default();
+                    totals.calls.accumulate(*count);
+                    totals.self_ns.accumulate(*self_ns);
+                    if let Some(state) = self.functions.get_mut(&node.func) {
+                        state.self_ns_total.accumulate(*self_ns);
+                    }
+                    applied.push(Applied::Stack {
+                        path: *path,
+                        calls: *count,
+                        self_ns: *self_ns,
+                    });
                 }
                 Event::Census { ty, live, bytes, sizes } => {
                     let reading = CensusReading {
@@ -309,6 +368,7 @@ impl ProcessState {
 enum Applied {
     Calls { func: FunctionId, calls: u64, ns: u64 },
     Edge { from: FunctionId, to: FunctionId, calls: u64 },
+    Stack { path: PathId, calls: u64, self_ns: u64 },
     Census { ty: TypeId, reading: CensusReading },
 }
 
@@ -318,6 +378,7 @@ fn fold(window: Option<&mut Window>, applied: &[Applied]) {
         match item {
             Applied::Calls { func, calls, ns } => window.add_calls(*func, *calls, *ns),
             Applied::Edge { from, to, calls } => window.add_edge(*from, *to, *calls),
+            Applied::Stack { path, calls, self_ns } => window.add_stack(*path, *calls, *self_ns),
             Applied::Census { ty, reading } => window.record_census(*ty, reading.clone()),
         }
     }
@@ -421,6 +482,8 @@ mod tests {
                 },
                 Register::Function { id: FunctionId(2), name: "resize".into(), module: None, location: None },
                 Register::Type { id: TypeId(1), name: "Thumbnail".into(), location: None },
+                Register::Path { id: PathId(1), parent: PathId(0), func: FunctionId(1) },
+                Register::Path { id: PathId(2), parent: PathId(1), func: FunctionId(2) },
             ],
             events: vec![],
         }
@@ -448,6 +511,8 @@ mod tests {
             events: vec![
                 Event::Calls { func: FunctionId(1), count, ns: Dist::Raw { v: vec![1_000; count as usize] } },
                 Event::Edge { from: FunctionId(1), to: FunctionId(2), count },
+                Event::Stack { path: PathId(2), count, self_ns: count * 600 },
+                Event::Stack { path: PathId(1), count, self_ns: count * 400 },
             ],
         }
     }
@@ -457,6 +522,88 @@ mod tests {
         let state = registry.connect(&hello());
         state.write().unwrap().apply_frame(&registered_frame());
         state
+    }
+
+    #[test]
+    fn a_calling_context_accumulates_its_self_time_as_a_delta() {
+        let state = connected();
+        let mut process = state.write().unwrap();
+        process.apply_frame(&calls_frame(1, 100_000_000, 10));
+        process.apply_frame(&calls_frame(2, 200_000_000, 10));
+
+        assert_eq!(process.path_totals[&PathId(2)].calls.get(), 20);
+        assert_eq!(process.path_totals[&PathId(2)].self_ns.get(), 12_000);
+        assert_eq!(
+            process.functions[&FunctionId(2)].self_ns_total.get(),
+            12_000,
+            "a function's self time is the sum over every context it was reached through"
+        );
+    }
+
+    #[test]
+    fn self_time_over_the_tree_never_exceeds_the_inclusive_time_reported_for_the_root() {
+        let state = connected();
+        let mut process = state.write().unwrap();
+        process.apply_frame(&calls_frame(1, 100_000_000, 10));
+
+        let over_the_tree: u64 = process.path_totals.values().map(|t| t.self_ns.get()).sum();
+        assert_eq!(over_the_tree, 10_000);
+        assert_eq!(
+            process.functions[&FunctionId(1)].ns_total.get(),
+            10_000,
+            "the tree's self time and the root's inclusive time are the same nanoseconds"
+        );
+    }
+
+    #[test]
+    fn a_stack_naming_an_unregistered_context_is_counted_and_dropped() {
+        let state = connected();
+        let mut process = state.write().unwrap();
+        process.apply_frame(&Frame {
+            seq: 1,
+            t_ns: 100_000_000,
+            registers: vec![],
+            events: vec![Event::Stack { path: PathId(98), count: 3, self_ns: 500 }],
+        });
+
+        assert_eq!(process.counts.unknown_id, 1);
+        assert!(process.path_totals.is_empty());
+    }
+
+    #[test]
+    fn a_context_hanging_off_a_parent_this_stream_never_introduced_is_refused() {
+        let state = connected();
+        let mut process = state.write().unwrap();
+        process.apply_frame(&Frame {
+            seq: 1,
+            t_ns: 100_000_000,
+            registers: vec![
+                // Parent 77 was never registered, and function 99 never was
+                // either. Neither may become a root by default.
+                Register::Path { id: PathId(3), parent: PathId(77), func: FunctionId(1) },
+                Register::Path { id: PathId(4), parent: PathId(0), func: FunctionId(99) },
+            ],
+            events: vec![],
+        });
+
+        assert_eq!(process.counts.unknown_id, 2);
+        assert!(!process.paths.contains_key(&PathId(3)));
+        assert!(!process.paths.contains_key(&PathId(4)));
+    }
+
+    #[test]
+    fn the_coarse_ring_rolls_stacks_up_the_way_it_rolls_calls_up() {
+        let state = connected();
+        let mut process = state.write().unwrap();
+        for step in 0..10u64 {
+            process.apply_frame(&calls_frame(step + 1, step * 100_000_000, 2));
+        }
+
+        let coarse = process.coarse.get(0).expect("one coarse window covers ten fine ones");
+        assert_eq!(coarse.stacks[&PathId(2)].calls.get(), 20);
+        assert_eq!(coarse.stacks[&PathId(2)].self_ns.get(), 12_000);
+        let fine: u64 = process.fine.iter().filter_map(|w| w.stacks.get(&PathId(2))).map(|d| d.self_ns.get()).sum();
+        assert_eq!(fine, coarse.stacks[&PathId(2)].self_ns.get());
     }
 
     #[test]
