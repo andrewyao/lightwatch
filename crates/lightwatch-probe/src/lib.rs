@@ -25,6 +25,43 @@
 //! assert_eq!(pixels.len(), 2);
 //! ```
 //!
+//! # Measuring a whole module
+//!
+//! A call graph is only as complete as the functions in it, and reaching a
+//! useful node count one attribute at a time is why most instrumented
+//! programs have three measured functions and no graph worth looking at.
+//! [`measure_all`] takes a `mod` or an `impl` block:
+//!
+//! ```
+//! use lightwatch_probe as lightwatch;
+//!
+//! #[lightwatch::measure_all]
+//! mod thumbnail {
+//!     use lightwatch_probe as lightwatch;
+//!
+//!     pub fn get_or_make(id: u32) -> u32 {
+//!         make(id)
+//!     }
+//!
+//!     fn make(id: u32) -> u32 {
+//!         id * 2
+//!     }
+//!
+//!     /// Left out on purpose, next to the reason.
+//!     #[lightwatch::measure(skip)]
+//!     pub fn cheap(id: u32) -> u32 {
+//!         id
+//!     }
+//! }
+//!
+//! assert_eq!(thumbnail::get_or_make(21), 42);
+//! ```
+//!
+//! Unlike [`measure`], it steps over what it cannot measure rather than
+//! failing the build. Being told no about one function you asked for is
+//! useful; being told no about a module because one function in it is
+//! `async` is not.
+//!
 //! # Read this before you trust a census
 //!
 //! [`track`] generates a [`Measured`] implementation that returns
@@ -89,7 +126,7 @@ extern crate self as lightwatch_probe;
 pub mod census;
 
 pub use census::{Census, Measured, Tracked, TypeSlot};
-pub use lightwatch_probe_macros::{measure, track};
+pub use lightwatch_probe_macros::{measure, measure_all, track};
 
 #[cfg(feature = "enabled")]
 mod calls;

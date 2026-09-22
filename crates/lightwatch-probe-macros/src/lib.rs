@@ -7,7 +7,7 @@ use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
 use syn::parse::Parser as _;
-use syn::{parse_macro_input, Ident, ItemFn, ItemStruct, LitStr};
+use syn::{parse_macro_input, Ident, ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemStruct, LitStr};
 
 /// The path the generated code calls the probe crate by. A consumer that
 /// renames the dependency (`lightwatch = { package = "lightwatch-probe" }`, so
@@ -32,17 +32,27 @@ fn probe_crate() -> proc_macro2::TokenStream {
 #[proc_macro_attribute]
 pub fn measure(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut name_override: Option<LitStr> = None;
+    let mut skip = false;
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("name") {
             name_override = Some(meta.value()?.parse()?);
             Ok(())
+        } else if meta.path.is_ident("skip") {
+            skip = true;
+            Ok(())
         } else {
-            Err(meta.error("expected `name = \"...\"`"))
+            Err(meta.error("expected `name = \"...\"` or `skip`"))
         }
     });
     parse_macro_input!(attr with parser);
 
     let function = parse_macro_input!(item as ItemFn);
+
+    // Written so a function inside a `#[measure_all]` module can opt out in
+    // place, next to the reason, rather than by being moved out of it.
+    if skip {
+        return quote!(#function).into();
+    }
 
     // An async fn's body becomes a future that a runtime may poll on one
     // thread and resume on another. A thread-local activation stack cannot
@@ -69,6 +79,85 @@ pub fn measure(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     expand_measure(function, name_override)
+}
+
+/// Measures every function in a `mod` or an `impl` block.
+///
+/// A call graph is only as complete as the functions in it, and reaching a
+/// useful node count one attribute at a time is the reason most instrumented
+/// programs have three measured functions and no graph worth looking at.
+///
+/// Unlike [`measure`], this skips what it cannot measure — `async fn`,
+/// `const fn`, and anything already carrying `#[measure]` — instead of
+/// failing the build. Asking for one function to be measured and being told
+/// no is useful; asking for a module and being told no because one function
+/// in it is `async` is not. Put `#[measure(skip)]` on a function to leave it
+/// out on purpose.
+#[proc_macro_attribute]
+pub fn measure_all(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        let attr: proc_macro2::TokenStream = attr.into();
+        return syn::Error::new_spanned(attr, "`measure_all` takes no arguments")
+            .to_compile_error()
+            .into();
+    }
+
+    let item = parse_macro_input!(item as Item);
+    match item {
+        Item::Mod(module) => expand_measure_all_mod(module),
+        Item::Impl(block) => expand_measure_all_impl(block),
+        other => syn::Error::new_spanned(
+            other,
+            "`measure_all` applies to a `mod` or an `impl` block. For one function, use \
+             `#[measure]`, which will also tell you when a function cannot be measured.",
+        )
+        .to_compile_error()
+        .into(),
+    }
+}
+
+fn expand_measure_all_mod(mut module: ItemMod) -> TokenStream {
+    if let Some((_, items)) = &mut module.content {
+        for item in items.iter_mut() {
+            match item {
+                Item::Fn(function) => measure_in_place(&mut function.attrs, &function.sig),
+                // Only direct children: a nested module says for itself
+                // whether it wants measuring, and an `impl` inside one is
+                // reached by putting the attribute on the impl.
+                _ => {}
+            }
+        }
+    } else {
+        return syn::Error::new_spanned(
+            module,
+            "`measure_all` needs the module's body, so it cannot go on `mod foo;`",
+        )
+        .to_compile_error()
+        .into();
+    }
+    quote!(#module).into()
+}
+
+fn expand_measure_all_impl(mut block: ItemImpl) -> TokenStream {
+    for item in block.items.iter_mut() {
+        if let ImplItem::Fn(function) = item {
+            measure_in_place(&mut function.attrs, &function.sig);
+        }
+    }
+    quote!(#block).into()
+}
+
+/// Adds `#[measure]` to a function unless it cannot take one or already has.
+fn measure_in_place(attrs: &mut Vec<syn::Attribute>, sig: &syn::Signature) {
+    if sig.asyncness.is_some() || sig.constness.is_some() {
+        return;
+    }
+    let already = attrs.iter().any(|attr| attr.path().segments.last().is_some_and(|last| last.ident == "measure"));
+    if already {
+        return;
+    }
+    let probe = probe_crate();
+    attrs.insert(0, syn::parse_quote!(#[#probe::measure]));
 }
 
 #[cfg(not(feature = "enabled"))]
