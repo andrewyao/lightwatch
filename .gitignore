@@ -3,3 +3,7 @@
 /web/dist
 todo.md
 /Cargo.lock
+# roborev snapshots
+/.roborev/
+# agent worktrees and local session state
+/.claude/
