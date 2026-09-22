@@ -17,12 +17,19 @@ first. See `crates/lightwatch-proto/src/lib.rs` for the message shapes.
 
 ## The one thing to get right
 
-`calls` and `edge` events are **deltas** and accumulate. A `census` event is an
+`calls` and `stack` events are **deltas** and accumulate. A `census` event is an
 **absolute reading** at window close and replaces the previous one. The API
-keeps them apart by name. A field called `*_total` or a window's `calls` and
-`edges` accumulate; a `census` object is a reading and must never be summed
-across windows. Charting a census as a sum produces a number that grows forever
-and means nothing.
+keeps them apart by name. A field called `*_total` or a window's `calls`,
+`edges` and `stacks` accumulate; a `census` object is a reading and must never
+be summed across windows. Charting a census as a sum produces a number that
+grows forever and means nothing.
+
+This bites hardest when a client folds several windows into one bucket for a
+chart. Deltas add. A census takes the **last** reading in the bucket, and when
+a bucket has none it carries the previous one forward, because a type that had
+nothing to say did not cease to exist. The daemon has `Cumulative` and
+`Absolute` to make the mistake a compile error; a client has only this
+paragraph and the observation that memory has to be able to fall.
 
 ## Time
 
@@ -33,8 +40,14 @@ for the last minute and at second resolution for the last fifteen. An emitter
 that picks a different `window_ms` folds into the same axis instead of giving
 each process its own.
 
-A window's `index` is `t_ns / 100000000`. Windows are contiguous and ascending,
-and an idle stretch appears as empty windows rather than a gap in the series.
+A window's `index` is `t_ns / <the resolution you asked for>`. Windows are
+contiguous and ascending, and an idle stretch appears as empty windows rather
+than a gap in the series.
+
+Both rings are reachable: see `?resolution=` below. Note that a window can hold
+more self time than it holds wall clock. The call tree is process-wide, so N
+busy threads contribute N times the clock, and a client that normalises against
+the window duration will render a busy program at several hundred percent.
 
 ## `GET /api/processes`
 
@@ -67,6 +80,7 @@ folding their frames into one history corrupts every call total. `GET
         "functions": 2,
         "types": 1,
         "edges": 2,
+        "paths": 4,
         "missed_frames": 3,
         "late_frames": 0,
         "unknown_id": 1,
@@ -85,13 +99,16 @@ start time differs.
 for this process closed, and is null while it is streaming.
 
 `window_ms` is what the emitter declared it was doing, which is not the
-daemon's own window length. Use `fine_window_ms` from a snapshot for the axis.
+daemon's own window length. Use `resolution_ms` from a snapshot for the axis.
 
 The counts are the daemon's view of feed health. `missed_frames` counts windows
 the emitter itself admits it dropped, read off gaps in `seq`. `late_frames`
 counts frames whose `t_ns` fell before the oldest window still retained.
-`unknown_id` counts events naming a function or type that was never registered;
-those events are dropped. `malformed_lines` counts lines that did not parse,
+`unknown_id` counts events naming a function, type or context that was never
+registered, plus context registrations the daemon refused: one naming an
+unregistered function, one hanging off an unregistered or higher-numbered
+parent, and one that would redefine a context events have already been
+attributed to. Those events and registrations are dropped. `malformed_lines` counts lines that did not parse,
 plus any second `hello` mid-stream. All four are cumulative and a non-zero
 value means the feed is worth looking at, not that the daemon failed.
 
@@ -99,13 +116,27 @@ value means the feed is worth looking at, not that the daemon failed.
 
 Everything known about one process. `404` if the id is unknown.
 
+| Query | Default | What it does |
+| --- | --- | --- |
+| `resolution` | `fine` | Which ring the `windows` come from: `fine` (100ms, last minute) or `coarse` (1s, last quarter hour). Anything else is a `400` rather than a quiet fall back to `fine`. |
+| `limit` | the ring's capacity | Return at most this many of the **most recent** windows. |
+
+`limit` is not decoration. The coarse ring is nine hundred windows deep and a
+window can name hundreds of contexts, so a client that wants a two-minute axis
+should ask for a two-minute axis.
+
+The `*_per_sec` fields are always averaged over the fine ring whatever
+`resolution` says. Asking for a longer axis is not asking for "per second" to
+start meaning something else.
+
 ```json
 {
   "process": { "...": "the same object as in the list" },
   "taken_unix_ms": 1789925684934,
   "rate_window_ms": 1000,
-  "fine_window_ms": 100,
-  "fine_window_capacity": 600,
+  "resolution": "fine",
+  "resolution_ms": 100,
+  "resolution_capacity": 600,
   "functions": [
     {
       "id": 1,
@@ -114,8 +145,10 @@ Everything known about one process. `404` if the id is unknown.
       "location": { "file": "src/thumbnail.rs", "line": 407, "column": 12 },
       "calls_total": 40,
       "ns_total": 12160000,
+      "self_ns_total": 3040000,
       "calls_per_sec": 100.0,
       "ns_per_sec": 30400000.0,
+      "self_ns_per_sec": 7600000.0,
       "ns_buckets": [{ "lo": 1835008, "hi": 1900543, "count": 1 }]
     }
   ],
@@ -133,6 +166,10 @@ Everything known about one process. `404` if the id is unknown.
     }
   ],
   "edges": [{ "from": 1, "to": 2, "calls_total": 40 }],
+  "paths": [
+    { "id": 1, "parent": 0, "func": 1, "calls_total": 40, "self_ns_total": 3040000 },
+    { "id": 2, "parent": 1, "func": 2, "calls_total": 40, "self_ns_total": 9120000 }
+  ],
   "windows": [
     {
       "index": 1,
@@ -140,6 +177,7 @@ Everything known about one process. `404` if the id is unknown.
       "end_t_ns": 200000000,
       "calls": [{ "func": 1, "calls": 16, "ns": 7860000 }],
       "edges": [{ "from": 1, "to": 2, "calls": 16 }],
+      "stacks": [{ "path": 2, "calls": 16, "self_ns": 4300000 }],
       "census": [{ "ty": 1, "live": 3, "bytes": 900 }]
     }
   ]
@@ -158,18 +196,40 @@ ranges in nanoseconds so a client never has to port the bucketing. `lo` and
 histogram, the total is a bucket-midpoint estimate, within the 6.25% the
 protocol's bucketing guarantees.
 
+`self_ns_total` is time spent in the function and outside any measured callee,
+summed over every context it was reached through. Unlike `ns_total`, adding it
+across every function double-counts nothing, so it is the field to chart a
+process's own time with.
+
 **types.** `census` is the latest reading, or null when that type has never
 reported one. `live` and `bytes` are what was true at `at_t_ns` and are not
 running totals. `size_buckets` describes the sizes of those live instances,
 with `lo` and `hi` in bytes.
 
-**edges.** `calls_total` accumulates over the whole process lifetime and never
-expires, so the call graph does not flicker as an edge goes quiet. Only edges
-where both ends are instrumented exist, so an uninstrumented frame between two
-measured functions shows as a direct edge.
+**edges.** Derived from `paths`: a context names a function and the context
+that reached it, so the pair is already there and its weight is how often that
+context was entered. `calls_total` accumulates over the whole process lifetime
+and never expires, so the call graph does not flicker as an edge goes quiet.
+Only edges where both ends are instrumented exist, so an uninstrumented frame
+between two measured functions shows as a direct edge.
 
-**windows.** The fine ring, oldest first, at most `fine_window_capacity`
-entries. Inside a window, `calls` and `edges` are that window's own deltas and
+**paths.** The call tree, kept for the process lifetime like `edges`. A node is
+a function reached through one particular chain of callers; `parent` names the
+context above it, and `0` means nothing measured called it. A node's `id` is
+always greater than its `parent`, so walking upward terminates.
+
+`self_ns_total` is time in that context and outside any measured callee, so
+summing a subtree gives that subtree's inclusive time with nothing counted
+twice. That is what makes a flame graph drawable from this: box width is the
+subtree sum, and no client has to subtract anything.
+
+A recursive function is two contexts however deep it goes: its outermost one,
+and one shared by every level below, hanging off the first. `calls_total` on a
+context counts activations that *opened* it, so for the shared one that is one
+per outermost entry, not one per level.
+
+**windows.** The ring you asked for, oldest first, at most
+`resolution_capacity` entries and at most `limit` of them. Inside a window, `calls` and `edges` are that window's own deltas and
 `census` is the reading taken at its close. An empty window is an idle stretch,
 not a hole.
 
@@ -191,6 +251,9 @@ flushed when the process disconnects. Windows that stayed empty are not pushed.
 Fetch a snapshot first and then subscribe. A client that falls more than 256
 windows behind loses the ones in between and the daemon logs it; the next
 snapshot is the way back to a correct picture.
+
+Only **fine** windows are pushed, whatever resolution the snapshot was taken
+at. A client on a coarse axis folds them itself or re-polls.
 
 ## `GET /api/sessions`
 
@@ -258,10 +321,10 @@ A feed that connects after the socket is open does not join it. Re-read
 
 ## `GET /`
 
-Serves the web UI embedded from `crates/lightwatch-daemon/web/`: live CPU per
-function and live census per type for one session, driven by
-`/api/sessions/{id}/stream` and falling back to snapshot polling whenever that
-socket is down. Plain ES modules, no build step, but `include_dir!` reads the
+Serves the web UI embedded from `crates/lightwatch-daemon/web/`: a flame graph
+of the call tree and a force-directed call graph, over a shared axis of CPU
+self time and live bytes per bucket, driven by `/api/sessions/{id}/stream` and
+falling back to snapshot polling whenever that socket is down. Plain ES modules, no build step, but `include_dir!` reads the
 directory at compile time, so an edit under `web/` needs a rebuild to be served.
 
 Any path the bundle does not contain falls through to its `index.html`, so a
@@ -270,7 +333,8 @@ single-page UI keeps its own routing. A build whose `web/` holds no
 
 ## Refusals at the boundary
 
-A `hello` whose `schema` is not `lightwatch_proto::SCHEMA_VERSION` is refused
+A `hello` whose `schema` is not `lightwatch_proto::SCHEMA_VERSION` (currently
+`2`) is refused
 with a logged reason and the connection closes; nothing is registered. A stream
 whose first line is not a parseable `hello` is refused the same way. After the
 handshake the daemon is forgiving: a line that does not parse is counted and

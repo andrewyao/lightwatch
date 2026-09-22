@@ -1,8 +1,9 @@
 //! Emit lightwatch frames from a running Rust program.
 //!
-//! Two things this answers that a timing profiler does not: **which function
-//! called which**, and **how many objects of a given type are alive**. Timings
-//! are collected only because a frame carries them.
+//! Two things this answers that a timing profiler does not: **through which
+//! chain of callers a function was reached**, and **how many objects of a
+//! given type are alive**. Timings are collected only because a frame carries
+//! them.
 //!
 //! ```
 //! use lightwatch_probe as lightwatch;
@@ -96,17 +97,48 @@
 //! `manual_measured` tells [`track`] to leave the implementation to you;
 //! without it the generated one would collide with yours.
 //!
-//! # What the call graph shows
+//! # What the call tree shows
 //!
-//! Only edges where **both** ends carry [`measure`] are visible. An
-//! uninstrumented function between two measured ones collapses into a direct
-//! edge from the outer to the inner. That is the intended reading: the graph
-//! describes the measured program, not the whole program.
+//! Only frames carrying [`measure`] appear. An uninstrumented function between
+//! two measured ones collapses, so the inner hangs directly off the outer and
+//! the time the uninstrumented frame spent is charged to the outer one. That
+//! is the intended reading: the tree describes the measured program, not the
+//! whole program, and the nearest measured caller is the only honest place to
+//! put the cost of what it called.
+//!
+//! Each context reports **self time**: the nanoseconds it spent outside any
+//! measured callee. Summing a subtree gives that subtree's inclusive time with
+//! no nanosecond counted twice, and summing the whole tree gives what the
+//! process spent.
+//!
+//! A graph edge is a reading of the tree rather than a separate count. A
+//! context names a function and the context that reached it, so the pair is
+//! already there.
 //!
 //! Recursion is recorded once per outermost entry. A function that calls
 //! itself twenty deep contributes one call, one duration covering the whole
 //! outermost activation, and one `f -> f` edge. Counting each level would
 //! multiply both the call count and the time.
+//!
+//! It costs the tree exactly one extra node per recursive function: every
+//! level shares a context hanging off that function's own outermost one, so
+//! twenty deep is two contexts rather than twenty. Hanging it off the
+//! outermost node rather than the nearest one bounds a cycle through several
+//! functions as well, and **that loses an edge**: `a -> b -> a` records
+//! `a -> a` and not `b -> a`, because the inner `a` is parented off `a`'s own
+//! outermost context. Nothing in this repository exercises mutual recursion,
+//! so nothing will go red if that assumption stops being acceptable.
+//!
+//! The tree is process-wide, not per-thread. Two threads walking the same
+//! chain share its contexts and their self times merge, which is what a flame
+//! graph wants and is why a context can never say *which thread*. One
+//! consequence reaches any client: a window can hold more self time than it
+//! holds wall clock.
+//!
+//! A process may name only so many contexts before the table stops growing
+//! (`LIGHTWATCH_MAX_PATHS`, 65536 by default). Past the ceiling an activation
+//! reports against the nearest context that fits, so the tree gets shallower
+//! rather than unbounded and every nanosecond is still accounted for.
 //!
 //! `async fn` is rejected at compile time. A future polled on one thread and
 //! resumed on another would attribute its edges to whatever happened to be on

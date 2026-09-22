@@ -9,6 +9,10 @@
 //!   descend ──▶ descend         (one self-edge however deep it goes)
 //! ```
 //!
+//! `c` is reached two ways, so it is one node in the graph and two contexts in
+//! the call tree. That difference is the whole reason the tree exists: an edge
+//! cannot say whose time a shared leaf spent.
+//!
 //! [`import`] is the other half: an ordinary pipeline, seven frames deep and
 //! branching, so an interface has proportions to draw rather than seven
 //! functions in a row.

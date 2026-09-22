@@ -73,8 +73,14 @@ while time.time() < deadline:
         if message["type"] == "window":
             window = message["window"]
             print(
-                "  push window=%d calls=%s edges=%s census=%s"
-                % (window["index"], window["calls"], window["edges"], window["census"]),
+                "  push window=%d calls=%s edges=%s stacks=%s census=%s"
+                % (
+                    window["index"],
+                    window["calls"],
+                    window["edges"],
+                    window["stacks"],
+                    window["census"],
+                ),
                 flush=True,
             )
         else:

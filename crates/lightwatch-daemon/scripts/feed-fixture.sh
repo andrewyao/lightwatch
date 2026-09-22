@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Feeds a fixture stream into a running daemon over its unix socket and prints
 # what the HTTP API says about it. The fixture is deliberately hostile: a line
-# that is not JSON, an event naming a function nobody registered, a census that
-# rises and falls, and a second connection speaking the wrong schema version.
+# that is not JSON, an event naming a function nobody registered, a context
+# hanging off a parent nobody registered, a stack naming a context that does
+# not exist, a census that rises and falls, and a second connection speaking
+# the wrong schema version. None of it may close the connection; all of it has
+# to show up in the counts.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -33,7 +36,7 @@ cat >"$fixture" <<'STREAM'
 {"msg":"frame","seq":1,"t_ns":100000000,"events":[{"kind":"calls","func":1,"count":16,"ns":{"enc":"raw","v":[2110000,5750000]}},{"kind":"stack","path":2,"count":16,"self_ns":0},{"kind":"census","ty":1,"live":3,"bytes":900,"sizes":{"enc":"raw","v":[300,300,300]}}]}
 this line is not json and must not kill the connection
 {"msg":"frame","seq":2,"t_ns":200000000,"events":[{"kind":"calls","func":1,"count":24,"ns":{"enc":"raw","v":[1900000,2400000]}},{"kind":"stack","path":2,"count":24,"self_ns":0},{"kind":"census","ty":1,"live":9,"bytes":2700,"sizes":{"enc":"raw","v":[300,300,300,300,300,300,300,300,300]}}]}
-{"msg":"frame","seq":3,"t_ns":300000000,"events":[{"kind":"calls","func":99,"count":1000,"ns":{"enc":"raw","v":[1]}},{"kind":"census","ty":1,"live":4,"bytes":1200,"sizes":{"enc":"raw","v":[300,300,300,300]}}]}
+{"msg":"frame","seq":3,"t_ns":300000000,"registers":[{"kind":"path","id":9,"parent":7,"func":1},{"kind":"path","id":10,"parent":0,"func":98}],"events":[{"kind":"calls","func":99,"count":1000,"ns":{"enc":"raw","v":[1]}},{"kind":"stack","path":97,"count":5,"self_ns":1000},{"kind":"census","ty":1,"live":4,"bytes":1200,"sizes":{"enc":"raw","v":[300,300,300,300]}}]}
 {"msg":"frame","seq":7,"t_ns":400000000,"events":[{"kind":"calls","func":2,"count":8,"ns":{"enc":"raw","v":[9100000]}},{"kind":"stack","path":4,"count":2,"self_ns":0},{"kind":"census","ty":1,"live":5,"bytes":1500,"sizes":{"enc":"raw","v":[300,300,300,300,300]}}]}
 STREAM
 

@@ -7,9 +7,10 @@ read a table. That cannot answer the question that matters while you are using
 the program, which is what it is doing right now, during the interaction that
 feels slow.
 
-lightwatch attaches to a running process and shows two things. A graph of the
-functions being called, with the edges that were actually taken. A census of the
-objects alive at this instant, by type.
+lightwatch attaches to a running process and shows what it was doing during a
+window of its own recent past: a flame graph of the call tree, a graph of the
+functions with the edges actually taken, and a census of the objects alive, all
+over one time axis you can scrub.
 
 ## What hotpath already provides
 
@@ -25,9 +26,10 @@ by call count and showing their source locations needs no new instrumentation.
 
 ## What it does not provide, and why lightwatch exists
 
-Call edges. `caller_stack.rs` compiles only under the SQL and HTTP features, and
-it attributes a query to its nearest measured caller. Nothing in hotpath records
-that one measured function called another.
+Call edges, and the tree they belong to. `caller_stack.rs` compiles only under
+the SQL and HTTP features, and it attributes a query to its nearest measured
+caller. Nothing in hotpath records that one measured function called another,
+let alone through which chain of callers.
 
 Live objects. `hotpath-alloc` counts bytes allocated per function. There is no
 type, no liveness and no free. How many `Thumbnail` values exist right now is
@@ -53,7 +55,7 @@ both into the same form. Raw exists so a client in another language emits a
 distribution without porting the bucketing function. That is what makes "works
 against any application" a contract rather than a claim.
 
-`Calls` and `Edge` are deltas that accumulate. `Census` is an absolute reading
+`Calls` and `Stack` are deltas that accumulate. `Census` is an absolute reading
 that replaces the previous one. Accumulating a census as though it were a delta
 is the easiest bug to write against this protocol, so the daemon's store keeps
 the two in separate types.
@@ -75,16 +77,39 @@ probe is the full-fidelity path.
 
 ## The probe supplies the missing two
 
-Edges come from a thread-local stack of function ids. Entering a measured
-function reads the current top as its parent, records the pair in a per-thread
-map and pushes itself. Only edges where both ends are instrumented are visible,
-so an uninstrumented frame between two measured functions collapses into a direct
-edge. That is the correct reading of which function depends on which.
+The call tree comes from a thread-local stack of function ids. Entering a
+measured function interns the pair `(the context it was called from, itself)`
+and pushes that context; leaving it reports the time it spent outside any
+measured callee. Only frames that are instrumented appear, so an uninstrumented
+frame between two measured ones collapses and its cost is charged to the nearest
+measured caller. That is the correct reading of which function depends on which.
+
+Self time rather than inclusive time, because self time adds up. Sum a subtree
+and you have its inclusive time with no nanosecond counted twice; sum the whole
+tree and you have what the process spent. Inclusive time on the wire would give
+a client numbers it has to subtract before it can draw anything, and one dropped
+window would make the subtraction wrong rather than merely incomplete.
+
+A graph edge is then a reading of the tree rather than a second set of counters:
+a context names a function and the context that reached it, so the pair is
+already there. Two mechanisms for one fact can disagree; one cannot.
+
+Recursion gets a single shared context hanging off the function's own outermost
+node, so a thousand levels deep is two contexts rather than a thousand. Hanging
+it off the outermost node rather than the nearest one bounds a cycle through
+several functions too. The cost is real and worth stating: `a -> b -> a` reports
+`a -> a` and loses `b -> a`.
 
 Runtime capture beats compile-time analysis here on both accuracy and reach. It
 sees dynamic dispatch, which static analysis cannot resolve, and it needs no
 build-time tooling, so the same technique ports to any language that can push and
 pop a stack.
+
+The tree is process-wide, not per-thread. Two threads walking the same chain of
+calls share its contexts and their times merge, which is what a flame graph
+wants and is also why a context can never answer *which thread*. It follows that
+a window can hold more self time than it holds wall clock, and an interface that
+divides by the clock will draw a busy program at several hundred percent.
 
 Census comes from an injected field. `#[lightwatch::track]` is an attribute macro
 rather than a derive, because Rust will not let you derive `Drop` and a tracked
@@ -102,17 +127,37 @@ function body unchanged, following the same discipline as hotpath's `lib_off`.
 
 ## The interface
 
-Functions list on the left, sorted by a windowed call rate rather than a lifetime
-total, or the ordering never moves. Each row has a toggle.
+One time axis, and two tabs that are both readings of it. The axis is two
+strips over the same buckets: self time by module, and live bytes by type.
+Clicking a bucket pins it, and the flame graph and the call graph both show
+that bucket.
 
-Toggling a row adds its node to the graph. Placement is computed, never manual,
-by a layered top-down layout, because a call graph is mostly a directed acyclic
-graph and reads as one. Right-clicking a node toggles on its callers or callees,
-which is how a view grows without scrolling a long list.
+The axis is above the tabs rather than inside one of them, because a scrubber
+you cannot reach from the view it drives is not a scrubber.
 
-The selection persists as a set of names, not coordinates. A set of names
-survives a rebuild that moves every function.
+Bucket size is a client-side fold over the daemon's windows, not a server
+setting. Changing it regroups nanoseconds already in the browser: instant, no
+refetch, and the same total however it is grouped. The daemon keeps its own two
+resolutions, a minute at 100ms and a quarter of an hour at one second, and the
+axis picks which to read.
 
-Layout re-runs only when the visible set changes. Metric updates mutate style
-alone. At ten frames a second, re-laying out on every update would make the graph
-twitch and become unreadable.
+The flame graph puts the root at the top. Depth grows downward, so the row
+being read does not move when the tree gets deeper between one bucket and the
+next. Width is a share of the bucket's own total, never of wall clock, for the
+threading reason above.
+
+Colour goes by module, not by a hash of the function name. A hash gives every
+box its own colour and says nothing, because boxes then differ where their
+names differ rather than where the work does. Eight hues in a fixed order; a
+ninth module is grey rather than a repeat of the first pretending to be
+distinct.
+
+The call graph is laid out by a force simulation, inside a centred box with a
+capped aspect. A panel spanning a wide window gives its canvas about five to
+one, and a force layout in a letterbox is not a graph: the ideal distance comes
+out taller than the space and every node clamps against an edge.
+
+Positions persist by function id across buckets, and the simulation stops when
+it settles. Scrubbing one bucket forward changes what is on screen and not
+where it is; re-running the layout on every update would make the graph twitch
+and become unreadable.
