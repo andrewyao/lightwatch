@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -12,7 +12,7 @@ use include_dir::{include_dir, Dir};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
-use crate::api;
+use crate::api::{self, Resolution, SnapshotView};
 use crate::session::{self, Feed};
 use crate::store::{now_unix_ms, ProcessId, Registry, Update};
 
@@ -50,13 +50,30 @@ async fn list_processes(State(registry): State<Arc<Registry>>) -> Json<api::Proc
     Json(api::ProcessList { processes })
 }
 
+/// What a client may ask a snapshot to cover.
+#[derive(Debug, serde::Deserialize)]
+struct SnapshotParams {
+    resolution: Option<String>,
+    limit: Option<usize>,
+}
+
 async fn snapshot(
     State(registry): State<Arc<Registry>>,
     Path(id): Path<String>,
+    Query(params): Query<SnapshotParams>,
 ) -> Result<Json<api::Snapshot>, StatusCode> {
+    // A resolution nobody recognizes is a client bug, and answering it with
+    // the fine view would hide that behind an axis quietly a quarter the
+    // length the client asked for.
+    let resolution = match params.resolution.as_deref() {
+        None => Resolution::Fine,
+        Some(raw) => Resolution::parse(raw).ok_or(StatusCode::BAD_REQUEST)?,
+    };
+    let view = SnapshotView { resolution, limit: params.limit.unwrap_or(usize::MAX) };
+
     let state = registry.get(&ProcessId::from(id.as_str())).ok_or(StatusCode::NOT_FOUND)?;
     let process = state.read().expect("process lock");
-    Ok(Json(api::snapshot(&process, now_unix_ms())))
+    Ok(Json(api::snapshot(&process, now_unix_ms(), view)))
 }
 
 async fn list_sessions(State(registry): State<Arc<Registry>>) -> Json<api::SessionList> {
@@ -229,7 +246,8 @@ lightwatch daemon
 No web UI is embedded in this build. The API is live:
 
   GET /api/processes                    every process this daemon has seen
-  GET /api/processes/{id}/snapshot      functions, types, edges and the fine ring
+  GET /api/processes/{id}/snapshot      functions, types, the call tree, and a ring
+                                        ?resolution=fine|coarse &limit=<n>
   GET /api/processes/{id}/stream        websocket, one message per closed window
   GET /api/sessions                     one entry per program, both emitters joined
   GET /api/sessions/{id}/stream         websocket, both feeds, each message tagged
@@ -267,6 +285,19 @@ mod tests {
             "/api/sessions/{id}/stream",
         ] {
             assert!(PLACEHOLDER.contains(route), "the placeholder does not mention {route}");
+        }
+    }
+
+    #[test]
+    fn a_resolution_nobody_recognises_is_refused_rather_than_quietly_narrowed() {
+        assert_eq!(Resolution::parse("fine"), Some(Resolution::Fine));
+        assert_eq!(Resolution::parse("coarse"), Some(Resolution::Coarse));
+
+        // Answering these with the fine view would hand back a minute of
+        // history to a client that asked for a quarter of an hour, and
+        // nothing in the response would say so.
+        for raw in ["FINE", "1s", "", "fine "] {
+            assert_eq!(Resolution::parse(raw), None, "`{raw}` is not a resolution");
         }
     }
 

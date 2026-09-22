@@ -12,6 +12,52 @@ use crate::store::{Counts, ProcessId, ProcessState, Update};
 /// How much of the recent past a per-second rate is averaged over.
 pub const RATE_WINDOW_MS: u64 = 1_000;
 
+/// Which ring a snapshot's windows come from.
+///
+/// The fine ring holds a minute at 100ms, which is the right axis for "what
+/// is it doing right now" and too short to be a rolling window. The coarse
+/// ring holds a quarter of an hour at one second, which is what a client
+/// folding into multi-second buckets wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    Fine,
+    Coarse,
+}
+
+impl Resolution {
+    pub fn parse(raw: &str) -> Option<Resolution> {
+        match raw {
+            "fine" => Some(Resolution::Fine),
+            "coarse" => Some(Resolution::Coarse),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Resolution::Fine => "fine",
+            Resolution::Coarse => "coarse",
+        }
+    }
+}
+
+/// What a client asked a snapshot to cover.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotView {
+    pub resolution: Resolution,
+    /// How many of the most recent windows to return. Clamped to the ring's
+    /// capacity. The coarse ring is nine hundred windows deep and a window
+    /// can name hundreds of contexts, so a client that wants an axis rather
+    /// than the whole history should say how long an axis.
+    pub limit: usize,
+}
+
+impl Default for SnapshotView {
+    fn default() -> Self {
+        SnapshotView { resolution: Resolution::Fine, limit: usize::MAX }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProcessList {
     pub processes: Vec<ProcessSummary>,
@@ -29,7 +75,7 @@ pub struct ProcessSummary {
     pub ended_unix_ms: Option<u64>,
     pub connected: bool,
     /// The window length the emitter declared, which is not the daemon's own
-    /// window length. See `fine_window_ms` on a snapshot.
+    /// window length. See `resolution_ms` on a snapshot.
     pub window_ms: u32,
     pub last_frame_unix_ms: Option<u64>,
     /// Monotonic nanoseconds since process start, at the newest frame's close.
@@ -44,6 +90,8 @@ pub struct CountsJson {
     pub functions: u64,
     pub types: u64,
     pub edges: u64,
+    /// Calling contexts this process has named.
+    pub paths: u64,
     pub missed_frames: u64,
     pub late_frames: u64,
     pub unknown_id: u64,
@@ -54,13 +102,37 @@ pub struct CountsJson {
 pub struct Snapshot {
     pub process: ProcessSummary,
     pub taken_unix_ms: u64,
+    /// How much of the recent past the `*_per_sec` fields are averaged over.
+    /// Always taken from the fine ring, whatever `resolution` says, so
+    /// "what is it doing now" does not change meaning with the view.
     pub rate_window_ms: u64,
-    pub fine_window_ms: u64,
-    pub fine_window_capacity: u64,
+    /// Which ring these windows came from: `"fine"` or `"coarse"`.
+    pub resolution: &'static str,
+    pub resolution_ms: u64,
+    pub resolution_capacity: u64,
     pub functions: Vec<FunctionJson>,
     pub types: Vec<TypeJson>,
     pub edges: Vec<EdgeJson>,
+    /// The call tree. Every window's `stacks` name nodes of this, and a node
+    /// names the one it hangs off, so a client walks upward to a root.
+    pub paths: Vec<PathJson>,
     pub windows: Vec<WindowJson>,
+}
+
+/// One calling context, with what it has cost over the process lifetime.
+///
+/// The lifetime totals are here so a client can draw a flame graph of the
+/// whole run without summing every retained window.
+#[derive(Debug, Serialize)]
+pub struct PathJson {
+    pub id: u32,
+    /// The context this one hangs off. Zero means nothing measured called it.
+    pub parent: u32,
+    pub func: u32,
+    pub calls_total: u64,
+    /// Nanoseconds spent in this context and outside any measured callee.
+    /// Summing a subtree gives that subtree's inclusive time.
+    pub self_ns_total: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,8 +145,13 @@ pub struct FunctionJson {
     pub calls_total: u64,
     /// Nanoseconds spent in those calls, since the process connected.
     pub ns_total: u64,
+    /// Nanoseconds spent in this function and outside any measured callee,
+    /// since the process connected. Unlike `ns_total`, summing this across
+    /// every function double-counts nothing.
+    pub self_ns_total: u64,
     pub calls_per_sec: f64,
     pub ns_per_sec: f64,
+    pub self_ns_per_sec: f64,
     /// Lifetime duration histogram. `lo` and `hi` are nanoseconds.
     pub ns_buckets: Vec<BucketJson>,
 }
@@ -121,8 +198,8 @@ pub struct LocationJson {
     pub column: Option<u32>,
 }
 
-/// One closed window. `calls` and `edges` are that window's own deltas;
-/// `census` is the reading taken at its close.
+/// One closed window. `calls`, `edges` and `stacks` are that window's own
+/// deltas; `census` is the reading taken at its close.
 #[derive(Debug, Serialize)]
 pub struct WindowJson {
     pub index: u64,
@@ -130,7 +207,15 @@ pub struct WindowJson {
     pub end_t_ns: u64,
     pub calls: Vec<WindowCallJson>,
     pub edges: Vec<WindowEdgeJson>,
+    pub stacks: Vec<WindowStackJson>,
     pub census: Vec<WindowCensusJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WindowStackJson {
+    pub path: u32,
+    pub calls: u64,
+    pub self_ns: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,6 +312,7 @@ fn counts(process: &ProcessState) -> CountsJson {
         functions: process.functions.len() as u64,
         types: process.types.len() as u64,
         edges: process.edges.len() as u64,
+        paths: process.paths.len() as u64,
         missed_frames,
         late_frames,
         unknown_id,
@@ -234,11 +320,22 @@ fn counts(process: &ProcessState) -> CountsJson {
     }
 }
 
-pub fn snapshot(process: &ProcessState, taken_unix_ms: u64) -> Snapshot {
-    let resolution_ns = process.fine.resolution_ns();
-    let rate_windows = (RATE_WINDOW_MS * 1_000_000 / resolution_ns).max(1) as usize;
+pub fn snapshot(process: &ProcessState, taken_unix_ms: u64, view: SnapshotView) -> Snapshot {
+    // Rates always come off the fine ring. A client switching to the coarse
+    // view is asking for a longer axis, not for "calls per second" to start
+    // meaning something else.
+    let fine_ns = process.fine.resolution_ns();
+    let rate_windows = (RATE_WINDOW_MS * 1_000_000 / fine_ns).max(1) as usize;
     let recent: Vec<&Window> = process.fine.most_recent(rate_windows).collect();
-    let covered_secs = (recent.len() as f64 * resolution_ns as f64) / 1e9;
+    let covered_secs = (recent.len() as f64 * fine_ns as f64) / 1e9;
+
+    let ring = match view.resolution {
+        Resolution::Fine => &process.fine,
+        Resolution::Coarse => &process.coarse,
+    };
+    let held = ring.iter().count();
+    let windows: Vec<WindowJson> =
+        ring.iter().skip(held.saturating_sub(view.limit)).map(window).collect();
 
     let functions = process
         .functions
@@ -250,6 +347,14 @@ pub fn snapshot(process: &ProcessState, taken_unix_ms: u64) -> Snapshot {
                     None => (calls, ns),
                 }
             });
+            let self_ns = recent
+                .iter()
+                .flat_map(|window| window.stacks.iter())
+                .filter(|(path, _)| {
+                    process.paths.get(path).is_some_and(|node| node.func == *id)
+                })
+                .map(|(_, delta)| delta.self_ns.get())
+                .sum::<u64>();
             FunctionJson {
                 id: id.0,
                 name: state.name.clone(),
@@ -257,8 +362,10 @@ pub fn snapshot(process: &ProcessState, taken_unix_ms: u64) -> Snapshot {
                 location: state.location.as_ref().map(location),
                 calls_total: state.calls.get(),
                 ns_total: state.ns_total.get(),
+                self_ns_total: state.self_ns_total.get(),
                 calls_per_sec: per_sec(calls, covered_secs),
                 ns_per_sec: per_sec(ns, covered_secs),
+                self_ns_per_sec: per_sec(self_ns, covered_secs),
                 ns_buckets: state
                     .ns_buckets
                     .iter()
@@ -285,16 +392,33 @@ pub fn snapshot(process: &ProcessState, taken_unix_ms: u64) -> Snapshot {
         .map(|((from, to), calls)| EdgeJson { from: from.0, to: to.0, calls_total: calls.get() })
         .collect();
 
+    let paths = process
+        .paths
+        .iter()
+        .map(|(id, node)| {
+            let totals = process.path_totals.get(id).copied().unwrap_or_default();
+            PathJson {
+                id: id.0,
+                parent: node.parent.0,
+                func: node.func.0,
+                calls_total: totals.calls.get(),
+                self_ns_total: totals.self_ns.get(),
+            }
+        })
+        .collect();
+
     Snapshot {
         process: summary(process),
         taken_unix_ms,
         rate_window_ms: RATE_WINDOW_MS,
-        fine_window_ms: resolution_ns / 1_000_000,
-        fine_window_capacity: process.fine.capacity() as u64,
+        resolution: view.resolution.as_str(),
+        resolution_ms: ring.resolution_ns() / 1_000_000,
+        resolution_capacity: ring.capacity() as u64,
         functions,
         types,
         edges,
-        windows: process.fine.iter().map(window).collect(),
+        paths,
+        windows,
     }
 }
 
@@ -368,6 +492,15 @@ fn window(source: &Window) -> WindowJson {
             .edges
             .iter()
             .map(|((from, to), calls)| WindowEdgeJson { from: from.0, to: to.0, calls: calls.get() })
+            .collect(),
+        stacks: source
+            .stacks
+            .iter()
+            .map(|(path, delta)| WindowStackJson {
+                path: path.0,
+                calls: delta.calls.get(),
+                self_ns: delta.self_ns.get(),
+            })
             .collect(),
         census: source
             .census
@@ -453,8 +586,8 @@ mod tests {
                         count: 4,
                         ns: Dist::Raw { v: vec![1_000_000; 4] },
                     },
-                    Event::Stack { path: PathId(2), count: 4, self_ns: 600_000 },
-                    Event::Stack { path: PathId(1), count: 4, self_ns: 400_000 },
+                    Event::Stack { path: PathId(2), count: 4, self_ns: 2_400_000 },
+                    Event::Stack { path: PathId(1), count: 4, self_ns: 1_600_000 },
                     Event::Census {
                         ty: TypeId(1),
                         live: window,
@@ -471,15 +604,15 @@ mod tests {
     #[test]
     fn the_snapshot_names_every_field_the_web_client_reads() {
         let state = process_with_traffic();
-        let json = serde_json::to_value(snapshot(&state.read().unwrap(), 1_700_000_001_000)).unwrap();
+        let json = serde_json::to_value(snapshot(&state.read().unwrap(), 1_700_000_001_000, SnapshotView::default())).unwrap();
 
-        for key in ["process", "taken_unix_ms", "rate_window_ms", "fine_window_ms", "functions", "types", "edges", "windows"] {
+        for key in ["process", "taken_unix_ms", "rate_window_ms", "resolution", "resolution_ms", "resolution_capacity", "functions", "types", "edges", "paths", "windows"] {
             assert!(json.get(key).is_some(), "snapshot lost the `{key}` field");
         }
         for key in ["id", "app", "pid", "source", "started_unix_ms", "ended_unix_ms", "connected", "window_ms", "counts"] {
             assert!(json["process"].get(key).is_some(), "process summary lost the `{key}` field");
         }
-        for key in ["id", "name", "calls_total", "ns_total", "calls_per_sec", "ns_per_sec", "ns_buckets"] {
+        for key in ["id", "name", "calls_total", "ns_total", "self_ns_total", "calls_per_sec", "ns_per_sec", "self_ns_per_sec", "ns_buckets"] {
             assert!(json["functions"][0].get(key).is_some(), "function lost the `{key}` field");
         }
         for key in ["live", "bytes", "at_t_ns", "size_buckets"] {
@@ -488,15 +621,103 @@ mod tests {
         for key in ["from", "to", "calls_total"] {
             assert!(json["edges"][0].get(key).is_some(), "edge lost the `{key}` field");
         }
-        for key in ["index", "start_t_ns", "end_t_ns", "calls", "edges", "census"] {
+        for key in ["id", "parent", "func", "calls_total", "self_ns_total"] {
+            assert!(json["paths"][0].get(key).is_some(), "path lost the `{key}` field");
+        }
+        for key in ["path", "calls", "self_ns"] {
+            assert!(json["windows"][0]["stacks"][0].get(key).is_some(), "window stack lost the `{key}` field");
+        }
+        for key in ["index", "start_t_ns", "end_t_ns", "calls", "edges", "stacks", "census"] {
             assert!(json["windows"][0].get(key).is_some(), "window lost the `{key}` field");
         }
     }
 
     #[test]
+    fn the_coarse_ring_is_reachable_and_the_snapshot_says_which_one_it_returned() {
+        let state = process_with_traffic();
+        let process = state.read().unwrap();
+
+        let fine = snapshot(&process, 1_700_000_001_000, SnapshotView::default());
+        assert_eq!(fine.resolution, "fine");
+        assert_eq!(fine.resolution_ms, 100);
+        assert_eq!(fine.resolution_capacity, 600);
+
+        let coarse = snapshot(
+            &process,
+            1_700_000_001_000,
+            SnapshotView { resolution: Resolution::Coarse, limit: usize::MAX },
+        );
+        assert_eq!(coarse.resolution, "coarse");
+        assert_eq!(coarse.resolution_ms, 1_000);
+        assert_eq!(coarse.resolution_capacity, 900);
+        assert!(
+            coarse.windows.len() < fine.windows.len(),
+            "ten fine windows of traffic roll into one coarse one"
+        );
+    }
+
+    #[test]
+    fn a_rate_means_the_same_thing_in_both_resolutions() {
+        let state = process_with_traffic();
+        let process = state.read().unwrap();
+
+        let fine = snapshot(&process, 1_700_000_001_000, SnapshotView::default());
+        let coarse = snapshot(
+            &process,
+            1_700_000_001_000,
+            SnapshotView { resolution: Resolution::Coarse, limit: usize::MAX },
+        );
+
+        // Asking for a longer axis is not asking for "calls per second" to
+        // start meaning calls per coarse window.
+        assert_eq!(fine.rate_window_ms, coarse.rate_window_ms);
+        for (from_fine, from_coarse) in fine.functions.iter().zip(&coarse.functions) {
+            assert_eq!(from_fine.calls_per_sec, from_coarse.calls_per_sec);
+            assert_eq!(from_fine.ns_per_sec, from_coarse.ns_per_sec);
+        }
+    }
+
+    #[test]
+    fn a_limit_returns_the_newest_windows_rather_than_the_oldest() {
+        let state = process_with_traffic();
+        let process = state.read().unwrap();
+
+        let all = snapshot(&process, 1_700_000_001_000, SnapshotView::default());
+        let tail = snapshot(
+            &process,
+            1_700_000_001_000,
+            SnapshotView { resolution: Resolution::Fine, limit: 3 },
+        );
+
+        assert_eq!(tail.windows.len(), 3);
+        let newest: Vec<u64> = all.windows.iter().rev().take(3).rev().map(|w| w.index).collect();
+        assert_eq!(tail.windows.iter().map(|w| w.index).collect::<Vec<_>>(), newest);
+    }
+
+    #[test]
+    fn a_context_carries_its_lifetime_totals_so_a_flame_graph_needs_no_window_sum() {
+        let state = process_with_traffic();
+        let snapshot = snapshot(&state.read().unwrap(), 1_700_000_001_000, SnapshotView::default());
+
+        let leaf = snapshot.paths.iter().find(|p| p.id == 2).expect("the leaf context is listed");
+        assert_eq!(leaf.parent, 1);
+        assert_eq!(leaf.func, 2);
+        assert_eq!(leaf.calls_total, 40, "ten windows of four entries");
+        assert_eq!(leaf.self_ns_total, 24_000_000);
+
+        let over_the_tree: u64 = snapshot.paths.iter().map(|p| p.self_ns_total).sum();
+        let root_inclusive =
+            snapshot.functions.iter().find(|f| f.id == 1).expect("decode is listed").ns_total;
+        assert_eq!(
+            over_the_tree, root_inclusive,
+            "the tree's self time and the root's inclusive time are the same nanoseconds"
+        );
+    }
+
+    #[test]
     fn the_snapshot_reports_a_census_as_the_latest_reading_and_calls_as_a_running_total() {
         let state = process_with_traffic();
-        let snapshot = snapshot(&state.read().unwrap(), 1_700_000_001_000);
+        let snapshot = snapshot(&state.read().unwrap(), 1_700_000_001_000, SnapshotView::default());
 
         let decode = snapshot.functions.iter().find(|f| f.id == 1).expect("decode is listed");
         assert_eq!(decode.calls_total, 40, "ten windows of four calls accumulate");
@@ -511,7 +732,7 @@ mod tests {
     #[test]
     fn the_rate_is_averaged_over_the_documented_window() {
         let state = process_with_traffic();
-        let snapshot = snapshot(&state.read().unwrap(), 1_700_000_001_000);
+        let snapshot = snapshot(&state.read().unwrap(), 1_700_000_001_000, SnapshotView::default());
         let decode = snapshot.functions.iter().find(|f| f.id == 1).expect("decode is listed");
         assert_eq!(snapshot.rate_window_ms, 1_000);
         assert_eq!(decode.calls_per_sec, 40.0, "four calls per 100ms window is forty a second");
@@ -520,7 +741,7 @@ mod tests {
     #[test]
     fn a_bucket_carries_the_value_range_so_a_client_need_not_port_the_bucketing() {
         let state = process_with_traffic();
-        let snapshot = snapshot(&state.read().unwrap(), 1_700_000_001_000);
+        let snapshot = snapshot(&state.read().unwrap(), 1_700_000_001_000, SnapshotView::default());
         let decode = snapshot.functions.iter().find(|f| f.id == 1).expect("decode is listed");
         let bucket = decode.ns_buckets.first().expect("durations were recorded");
         assert!(bucket.lo <= 1_000_000 && 1_000_000 <= bucket.hi, "the sample is inside its own range");

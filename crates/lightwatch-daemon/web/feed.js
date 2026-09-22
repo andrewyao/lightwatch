@@ -22,7 +22,7 @@ export class Feed {
 
   applySnapshot(snapshot) {
     this.frames = snapshot.process.counts.frames;
-    this.windowMs = snapshot.fine_window_ms || 100;
+    this.windowMs = snapshot.resolution_ms || 100;
     this.unknownIds.clear();
     for (const fn of snapshot.functions) {
       this.functions.set(fn.id, { name: fn.name, module: fn.module });
