@@ -119,13 +119,6 @@ impl Emitter {
                 ns: stat.ns.into_dist(),
             });
         }
-        for ((from, to), count) in accum.edges {
-            events.push(Event::Edge {
-                from: lightwatch_proto::FunctionId(from),
-                to: lightwatch_proto::FunctionId(to),
-                count,
-            });
-        }
         for (path, stat) in accum.stacks {
             events.push(Event::Stack {
                 path: lightwatch_proto::PathId(path),

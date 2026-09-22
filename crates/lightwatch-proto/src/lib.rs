@@ -112,14 +112,6 @@ pub enum Event {
         #[serde(default = "Dist::empty", skip_serializing_if = "Dist::is_empty")]
         ns: Dist,
     },
-    /// Delta. `from` called `to` this many times during the window. Only edges
-    /// where both ends are instrumented are visible, so an uninstrumented frame
-    /// between two measured functions collapses into a direct edge.
-    Edge {
-        from: FunctionId,
-        to: FunctionId,
-        count: u64,
-    },
     /// Delta. `count` activations of this calling context closed during the
     /// window, having spent `self_ns` nanoseconds *outside* any measured
     /// callee.
@@ -236,7 +228,6 @@ mod tests {
             ],
             events: vec![
                 Event::Calls { func: FunctionId(1), count: 16, ns: Dist::Raw { v: vec![2_110_000, 5_750_000] } },
-                Event::Edge { from: FunctionId(1), to: FunctionId(2), count: 16 },
                 Event::Stack { path: PathId(2), count: 16, self_ns: 4_300_000 },
                 Event::Census { ty: TypeId(1), live: 3, bytes: 900, sizes: Dist::Raw { v: vec![300, 300, 300] } },
             ],

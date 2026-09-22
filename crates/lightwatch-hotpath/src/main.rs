@@ -76,7 +76,7 @@ fn main() {
     let window = Duration::from_millis(args.window_ms as u64);
 
     eprintln!(
-        "lightwatch-hotpath: {} -> {}, {} ms windows. Degraded source: calls and durations only, no edges and no census.",
+        "lightwatch-hotpath: {} -> {}, {} ms windows. Degraded source: calls and durations only, no stacks and no census.",
         target.address(),
         args.socket.display(),
         args.window_ms

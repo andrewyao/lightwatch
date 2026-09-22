@@ -300,11 +300,6 @@ impl ProcessState {
                     }
                     applied.push(Applied::Calls { func: *func, calls: *count, ns: elapsed });
                 }
-                // Superseded by the call tree, which says the same thing and
-                // also says through which chain of callers. Ignored rather
-                // than counted against the feed: an emitter that still sends
-                // both is not malformed, it is a version behind.
-                Event::Edge { .. } => {}
                 Event::Stack { path, count, self_ns } => {
                     let Some(node) = self.paths.get(path).copied() else {
                         self.counts.unknown_id += 1;
@@ -530,7 +525,6 @@ mod tests {
             registers: vec![],
             events: vec![
                 Event::Calls { func: FunctionId(1), count, ns: Dist::Raw { v: vec![1_000; count as usize] } },
-                Event::Edge { from: FunctionId(1), to: FunctionId(2), count },
                 Event::Stack { path: PathId(2), count, self_ns: count * 600 },
                 Event::Stack { path: PathId(1), count, self_ns: count * 400 },
             ],

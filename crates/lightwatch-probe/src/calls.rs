@@ -7,10 +7,11 @@
 //! once per window to swap the maps out. There is no cross-thread contention
 //! on the hot path: two threads never touch the same accumulator.
 //!
-//! Only edges where both ends carry `#[measure]` are visible. An
-//! uninstrumented frame between two measured functions collapses into a direct
-//! edge from the outer one to the inner one. That is the intended reading of
-//! the graph, not a defect to work around.
+//! Only frames carrying `#[measure]` appear in a calling context. An
+//! uninstrumented frame between two measured ones collapses, so the inner
+//! function hangs directly off the outer one and the time the uninstrumented
+//! frame spent is charged to it. That is the intended reading of the graph,
+//! not a defect to work around.
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -102,8 +103,6 @@ impl Drop for Guard {
 
 struct Activation {
     func: u32,
-    /// Zero when this is the outermost measured frame on the thread.
-    parent: u32,
     /// The calling context this activation runs in.
     path: u32,
     start: Instant,
@@ -133,9 +132,6 @@ struct Depth {
     /// The context every recursive re-entry of this function runs in: a child
     /// of `path` naming the function again. Zero until the function recurses.
     recursion_path: u32,
-    /// Set when the function called itself directly. Read when the outermost
-    /// activation closes, which is the one place a self-edge is recorded.
-    self_recursed: bool,
 }
 
 struct ThreadState {
@@ -168,7 +164,6 @@ impl ThreadState {
     }
 
     fn open(&mut self, func: u32) {
-        let parent = self.stack.last().map_or(0, |a| a.func);
         let parent_path = self.stack.last().map_or(0, |a| a.path);
 
         let held = self.depth.get(&func).map(|d| (d.count, d.path, d.recursion_path));
@@ -194,26 +189,17 @@ impl ThreadState {
             }
         };
 
-        let depth = self.depth.entry(func).or_insert(Depth {
-            count: 0,
-            path,
-            recursion_path: 0,
-            self_recursed: false,
-        });
+        let depth = self.depth.entry(func).or_insert(Depth { count: 0, path, recursion_path: 0 });
         if outermost {
             depth.path = path;
             depth.recursion_path = 0;
         }
         depth.count += 1;
-        if !outermost && parent == func {
-            depth.self_recursed = true;
-        }
 
         // Last, so interning a context the program has not reached before
         // never lands inside the span this activation is about to measure.
         self.stack.push(Activation {
             func,
-            parent,
             path,
             start: Instant::now(),
             child_ns: 0,
@@ -240,28 +226,14 @@ impl ThreadState {
         }
         let self_ns = elapsed.saturating_sub(activation.child_ns);
 
-        let mut self_recursed = false;
         if let Some(depth) = self.depth.get_mut(&activation.func) {
             depth.count -= 1;
             if depth.count == 0 {
-                self_recursed = depth.self_recursed;
                 self.depth.remove(&activation.func);
             }
         }
 
-        // A direct self-call is a recursion level, not an edge of its own. The
-        // self-edge is recorded once, below, when the outermost activation of
-        // the function closes.
-        let caller_edge = activation.parent != 0 && activation.parent != activation.func;
-        let self_edge = activation.outermost && self_recursed;
-
         let mut accum = lock(&self.slot.accum);
-        if caller_edge {
-            *accum.edges.entry((activation.parent, activation.func)).or_insert(0) += 1;
-        }
-        if self_edge {
-            *accum.edges.entry((activation.func, activation.func)).or_insert(0) += 1;
-        }
         let stack = accum.stacks.entry(activation.path).or_default();
         stack.self_ns += self_ns;
         if activation.counts_here {
@@ -306,7 +278,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[derive(Default, Clone)]
 pub(crate) struct Accum {
-    pub(crate) edges: IntMap<(u32, u32), u64>,
     pub(crate) calls: IntMap<u32, CallStat>,
     pub(crate) stacks: IntMap<u32, StackStat>,
 }
@@ -399,9 +370,6 @@ impl Samples {
 
 impl Accum {
     fn absorb(&mut self, other: Accum) {
-        for (edge, count) in other.edges {
-            *self.edges.entry(edge).or_insert(0) += count;
-        }
         for (func, stat) in other.calls {
             let mine = self.calls.entry(func).or_default();
             mine.count += stat.count;

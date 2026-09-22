@@ -13,11 +13,13 @@
 //!
 //! What it gives up against the Rust probe, all of it inherent to the source:
 //!
-//! - **No call edges.** hotpath's caller stack compiles only under its SQL and
-//!   HTTP features, and even there it attributes a query to its nearest
-//!   measured caller rather than recording function-to-function calls. The
-//!   bridge emits no [`Event::Edge`](lightwatch_proto::Event::Edge), so a graph
-//!   drawn from this feed has nodes and no arrows.
+//! - **No call tree, and so no call graph and no flame graph.** hotpath's
+//!   caller stack compiles only under its SQL and HTTP features, and even
+//!   there it attributes a query to its nearest measured caller rather than
+//!   recording function-to-function calls. The bridge registers no
+//!   [`Register::Path`](lightwatch_proto::Register::Path) and emits no
+//!   [`Event::Stack`](lightwatch_proto::Event::Stack), so this feed is a list
+//!   of functions: nodes with no arrows between them, and no stacks to stack.
 //! - **No per-type census.** hotpath counts bytes allocated per function under
 //!   `hotpath-alloc`. There is no type, no liveness and no free at any feature
 //!   combination, so no [`Event::Census`](lightwatch_proto::Event::Census) is

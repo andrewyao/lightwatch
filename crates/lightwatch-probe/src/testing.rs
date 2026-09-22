@@ -11,24 +11,36 @@ use crate::{calls, registry};
 
 /// Every recorded caller/callee pair, by registered name.
 pub fn edges() -> BTreeSet<(&'static str, &'static str)> {
-    calls::snapshot()
-        .edges
-        .keys()
-        .filter_map(|(from, to)| {
-            Some((registry::function_name(*from)?, registry::function_name(*to)?))
-        })
-        .collect()
+    edge_counts().into_keys().collect()
 }
 
 /// How many times each pair was recorded.
+///
+/// Read off the call tree: a context names a function and the context that
+/// reaches it, so the edge is already there and the weight is how often that
+/// context was entered.
 pub fn edge_counts() -> BTreeMap<(&'static str, &'static str), u64> {
-    calls::snapshot()
-        .edges
-        .iter()
-        .filter_map(|((from, to), count)| {
-            Some(((registry::function_name(*from)?, registry::function_name(*to)?), *count))
-        })
-        .collect()
+    let recorded = calls::snapshot().stacks;
+    let func_of: BTreeMap<u32, u32> =
+        registry::path_nodes().into_iter().map(|(id, _, func)| (id, func)).collect();
+
+    let mut counts: BTreeMap<(&'static str, &'static str), u64> = BTreeMap::new();
+    for (id, parent, func) in registry::path_nodes() {
+        if parent == 0 {
+            continue;
+        }
+        // A context exists from the moment it is entered; an edge exists once
+        // something ran through it, which is what the old edge counter meant.
+        let Some(stat) = recorded.get(&id) else { continue };
+        let Some(caller) = func_of.get(&parent).copied() else { continue };
+        let (Some(from), Some(to)) =
+            (registry::function_name(caller), registry::function_name(func))
+        else {
+            continue;
+        };
+        *counts.entry((from, to)).or_insert(0) += stat.count;
+    }
+    counts
 }
 
 /// Every calling context recorded so far, keyed by the chain of function
