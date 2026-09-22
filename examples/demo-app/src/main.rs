@@ -3,10 +3,17 @@
 //! Builds a known number of objects, frees half of them, holds the rest, then
 //! frees those too, so a census watcher sees the live count rise, halve, and
 //! reach zero rather than one steady number.
+//!
+//! Two threads run the workload, because a call tree is process-wide: the two
+//! of them meet on the same contexts, and their self time merges there. A
+//! single-threaded demo would never exercise that, and would let an interface
+//! get away with normalising a flame width against wall-clock time.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use demo_app::{build_tags, build_thumbnails, one_round};
+use demo_app::{build_tags, build_thumbnails, import, one_round};
 
 const TAGS: usize = 200;
 const THUMBNAILS: usize = 64;
@@ -20,6 +27,19 @@ fn main() {
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(20);
     let window = Duration::from_millis(100);
+
+    // A second thread on the same contexts, at its own pace, so the feed is
+    // not a tidy single-threaded metronome.
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker = std::thread::spawn({
+        let stop = Arc::clone(&stop);
+        move || {
+            while !stop.load(Ordering::Relaxed) {
+                import::run(2, 192);
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+    });
 
     let mut tags = build_tags(TAGS);
     let mut thumbnails = build_thumbnails(THUMBNAILS, PIXEL_BYTES);
@@ -37,6 +57,9 @@ fn main() {
             println!("first round total {total}");
         }
     }
+
+    stop.store(true, Ordering::Relaxed);
+    worker.join().expect("the second worker should not panic");
 
     drop(tags);
     drop(thumbnails);

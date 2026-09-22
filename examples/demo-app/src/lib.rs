@@ -1,13 +1,17 @@
 //! A workload shaped to produce every event the lightwatch protocol carries,
 //! so the daemon and the UI have a real feed without a photo editor attached.
 //!
-//! The call graph it builds:
+//! The shapes it builds, one function per thing the protocol has to survive:
 //!
 //! ```text
 //!   a ──▶ b ──▶ c ◀── Decode::run ◀── pipeline ──▶ Encode::run
 //!   render ──▶ paint            (through an uninstrumented `blit`)
 //!   descend ──▶ descend         (one self-edge however deep it goes)
 //! ```
+//!
+//! [`import`] is the other half: an ordinary pipeline, seven frames deep and
+//! branching, so an interface has proportions to draw rather than seven
+//! functions in a row.
 //!
 //! `pipeline` reaches its two stages through `Box<dyn Stage>`. Nothing a
 //! compiler could see at the call site says which one runs, which is the whole
@@ -17,6 +21,8 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use lightwatch::{measure, track};
+
+pub mod import;
 
 #[measure]
 pub fn a() -> u64 {
@@ -136,5 +142,8 @@ pub fn build_thumbnails(count: usize, pixel_bytes: usize) -> Vec<Thumbnail> {
 
 /// One pass over the whole graph.
 pub fn one_round() -> u64 {
-    a() + pipeline(&stages()) + render() + descend(4)
+    a().wrapping_add(pipeline(&stages()))
+        .wrapping_add(render())
+        .wrapping_add(descend(4))
+        .wrapping_add(import::run(3, 256))
 }

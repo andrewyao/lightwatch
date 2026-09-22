@@ -7,7 +7,7 @@ use lightwatch::testing;
 
 #[test]
 fn two_threads_running_the_same_chain_share_its_contexts() {
-    let workers: Vec<_> = (0..2).map(|_| std::thread::spawn(|| a())).collect();
+    let workers: Vec<_> = (0..2).map(|_| std::thread::spawn(a)).collect();
     for worker in workers {
         worker.join().expect("a measured worker should not panic");
     }

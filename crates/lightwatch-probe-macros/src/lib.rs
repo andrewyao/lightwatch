@@ -118,13 +118,12 @@ pub fn measure_all(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn expand_measure_all_mod(mut module: ItemMod) -> TokenStream {
     if let Some((_, items)) = &mut module.content {
+        // Only direct children: a nested module says for itself whether it
+        // wants measuring, and an `impl` inside one is reached by putting the
+        // attribute on the impl.
         for item in items.iter_mut() {
-            match item {
-                Item::Fn(function) => measure_in_place(&mut function.attrs, &function.sig),
-                // Only direct children: a nested module says for itself
-                // whether it wants measuring, and an `impl` inside one is
-                // reached by putting the attribute on the impl.
-                _ => {}
+            if let Item::Fn(function) = item {
+                measure_in_place(&mut function.attrs, &function.sig);
             }
         }
     } else {
