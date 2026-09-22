@@ -70,7 +70,7 @@ impl std::fmt::Display for ProcessId {
 pub struct Counts {
     pub frames: u64,
     pub events: u64,
-    /// Events naming a function or type that was never registered.
+    /// Unknown IDs in events or registrations, and invalid path registrations.
     pub unknown_id: u64,
     /// Lines that did not parse, plus lines that parsed into something a
     /// mid-stream frame may not be.
@@ -241,7 +241,7 @@ impl ProcessState {
             // this stream never introduced, is dropped rather than stored as
             // a root it is not.
             Register::Path { id, parent, func } => {
-                if id.0 == 0 || !self.functions.contains_key(func) {
+                if id.0 <= parent.0 || !self.functions.contains_key(func) {
                     self.counts.unknown_id += 1;
                     return;
                 }
@@ -249,7 +249,16 @@ impl ProcessState {
                     self.counts.unknown_id += 1;
                     return;
                 }
-                self.paths.insert(*id, PathNode { parent: *parent, func: *func });
+                // IDs increase down the tree, and a context's identity cannot
+                // change after events have attributed history to it.
+                let node = PathNode { parent: *parent, func: *func };
+                if let Some(existing) = self.paths.get(id) {
+                    if *existing != node {
+                        self.counts.unknown_id += 1;
+                    }
+                    return;
+                }
+                self.paths.insert(*id, node);
             }
         }
     }
@@ -603,6 +612,84 @@ mod tests {
         assert_eq!(process.counts.unknown_id, 2);
         assert!(!process.paths.contains_key(&PathId(3)));
         assert!(!process.paths.contains_key(&PathId(4)));
+    }
+
+    #[test]
+    fn rejected_context_registrations_preserve_the_tree_and_totals() {
+        for (id, parent, func) in [
+            (2, 1, 1), // Change the function.
+            (2, 0, 2), // Change the parent, while still satisfying id > parent.
+            (1, 1, 1), // Make a node its own parent.
+            (1, 2, 1), // Make a descendant its parent.
+            (0, 0, 1), // Register the reserved root.
+            (3, 4, 1), // Introduce a new node below a larger, known parent.
+        ] {
+            let state = connected();
+            let mut process = state.write().unwrap();
+            process.apply_frame(&Frame {
+                seq: 1,
+                t_ns: 0,
+                registers: vec![Register::Path {
+                    id: PathId(4), parent: PathId(2), func: FunctionId(1),
+                }],
+                events: vec![],
+            });
+            process.apply_frame(&calls_frame(2, 100_000_000, 10));
+            let paths = process.paths.clone();
+            let totals = process.path_totals.clone();
+            let edges = process.edges.clone();
+            let fine = process.fine.get(1).unwrap().stacks.clone();
+            let coarse = process.coarse.get(0).unwrap().stacks.clone();
+
+            process.apply_frame(&Frame {
+                seq: 3,
+                t_ns: 100_000_000,
+                registers: vec![Register::Path {
+                    id: PathId(id), parent: PathId(parent), func: FunctionId(func),
+                }],
+                events: vec![],
+            });
+
+            assert_eq!(process.counts.unknown_id, 1);
+            assert_eq!(process.paths, paths);
+            assert_eq!(process.path_totals, totals);
+            assert_eq!(process.edges, edges);
+            assert_eq!(process.fine.get(1).unwrap().stacks, fine);
+            assert_eq!(process.coarse.get(0).unwrap().stacks, coarse);
+            assert_eq!(process.functions[&FunctionId(1)].self_ns_total.get(), 4_000);
+            assert_eq!(process.functions[&FunctionId(2)].self_ns_total.get(), 6_000);
+
+            process.apply_frame(&calls_frame(4, 100_000_000, 5));
+            assert_eq!(process.path_totals[&PathId(2)].self_ns.get(), 9_000);
+            assert_eq!(process.functions[&FunctionId(1)].self_ns_total.get(), 6_000);
+            assert_eq!(process.functions[&FunctionId(2)].self_ns_total.get(), 9_000);
+            assert_eq!(process.edges[&(FunctionId(1), FunctionId(2))].get(), 15);
+            assert_eq!(process.fine.get(1).unwrap().stacks[&PathId(2)].self_ns.get(), 9_000);
+            assert_eq!(process.coarse.get(0).unwrap().stacks[&PathId(2)].self_ns.get(), 9_000);
+        }
+    }
+
+    #[test]
+    fn identical_context_registrations_preserve_history_and_accept_new_events() {
+        let state = connected();
+        let mut process = state.write().unwrap();
+        process.apply_frame(&calls_frame(1, 100_000_000, 10));
+        let paths = process.paths.clone();
+        let mut frame = calls_frame(2, 100_000_000, 5);
+        frame.registers = vec![
+            Register::Path { id: PathId(1), parent: PathId(0), func: FunctionId(1) },
+            Register::Path { id: PathId(2), parent: PathId(1), func: FunctionId(2) },
+        ];
+        process.apply_frame(&frame);
+
+        assert_eq!(process.counts.unknown_id, 0);
+        assert_eq!(process.paths, paths);
+        assert_eq!(process.path_totals[&PathId(2)].calls.get(), 15);
+        assert_eq!(process.path_totals[&PathId(2)].self_ns.get(), 9_000);
+        assert_eq!(process.functions[&FunctionId(2)].self_ns_total.get(), 9_000);
+        assert_eq!(process.edges[&(FunctionId(1), FunctionId(2))].get(), 15);
+        assert_eq!(process.fine.get(1).unwrap().stacks[&PathId(2)].self_ns.get(), 9_000);
+        assert_eq!(process.coarse.get(0).unwrap().stacks[&PathId(2)].self_ns.get(), 9_000);
     }
 
     #[test]
