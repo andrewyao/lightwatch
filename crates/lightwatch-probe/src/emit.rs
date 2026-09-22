@@ -58,6 +58,7 @@ struct Emitter {
     sink: Option<Sink>,
     functions_sent: usize,
     types_sent: usize,
+    paths_sent: usize,
 }
 
 impl Emitter {
@@ -75,6 +76,7 @@ impl Emitter {
             sink: None,
             functions_sent: 0,
             types_sent: 0,
+            paths_sent: 0,
         }
     }
 
@@ -99,14 +101,15 @@ impl Emitter {
                     // A fresh listener has never seen this process's names.
                     self.functions_sent = 0;
                     self.types_sent = 0;
+                    self.paths_sent = 0;
                     self.sink = Some(sink);
                 }
                 None => return,
             }
         }
 
-        let (registers, functions_sent, types_sent) =
-            registry::registers_since(self.functions_sent, self.types_sent);
+        let (registers, functions_sent, types_sent, paths_sent) =
+            registry::registers_since(self.functions_sent, self.types_sent, self.paths_sent);
 
         let mut events = Vec::new();
         for (func, stat) in accum.calls {
@@ -121,6 +124,13 @@ impl Emitter {
                 from: lightwatch_proto::FunctionId(from),
                 to: lightwatch_proto::FunctionId(to),
                 count,
+            });
+        }
+        for (path, stat) in accum.stacks {
+            events.push(Event::Stack {
+                path: lightwatch_proto::PathId(path),
+                count: stat.count,
+                self_ns: stat.self_ns,
             });
         }
         for (id, slot) in registry::tracked_types() {
@@ -150,6 +160,7 @@ impl Emitter {
                 self.seq += 1;
                 self.functions_sent = functions_sent;
                 self.types_sent = types_sent;
+                self.paths_sent = paths_sent;
             }
             // The daemon went away. Reconnecting re-sends the hello and every
             // name binding, so the next listener is not left with bare ids.

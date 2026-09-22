@@ -104,15 +104,35 @@ struct Activation {
     func: u32,
     /// Zero when this is the outermost measured frame on the thread.
     parent: u32,
+    /// The calling context this activation runs in.
+    path: u32,
     start: Instant,
+    /// Inclusive time of the measured callees that closed inside this
+    /// activation. Subtracted at close to leave self time.
+    ///
+    /// It lives here, on the activation, and not in a map keyed by function.
+    /// A map looks equivalent and is shorter; under recursion it subtracts
+    /// the same nanoseconds at every level, self time goes negative, and the
+    /// saturating arithmetic below turns that into a silent zero.
+    child_ns: u64,
     /// False when this function was already on the stack, so its time is
     /// already being counted by an enclosing activation.
     outermost: bool,
+    /// Whether this activation is the one that opened its context. Every
+    /// activation reports self time; only this one reports a call, so a
+    /// recursive function counts once per outermost entry rather than once
+    /// per level.
+    counts_here: bool,
 }
 
 /// How deep the thread currently is inside one function.
 struct Depth {
     count: u32,
+    /// The context the outermost activation of this function runs in.
+    path: u32,
+    /// The context every recursive re-entry of this function runs in: a child
+    /// of `path` naming the function again. Zero until the function recurses.
+    recursion_path: u32,
     /// Set when the function called itself directly. Read when the outermost
     /// activation closes, which is the one place a self-edge is recorded.
     self_recursed: bool,
@@ -121,25 +141,105 @@ struct Depth {
 struct ThreadState {
     stack: Vec<Activation>,
     depth: IntMap<u32, Depth>,
+    /// This thread's cache of the global context table, so the interner's
+    /// lock is taken once per context the thread reaches rather than once per
+    /// call. The ids it caches came from that table, so it cannot disagree
+    /// with another thread about what a context is called.
+    memo: IntMap<(u32, u32), u32>,
     slot: Arc<ThreadSlot>,
 }
 
 impl ThreadState {
+    /// Interns `(parent_path, func)`, preferring this thread's cache.
+    ///
+    /// A full context table returns zero, and the activation then reports
+    /// against its parent: the tree stops deepening instead of growing
+    /// without bound.
+    fn context(&mut self, parent_path: u32, func: u32) -> u32 {
+        if let Some(known) = self.memo.get(&(parent_path, func)) {
+            return *known;
+        }
+        let path = crate::registry::intern_path(parent_path, func);
+        if path == 0 {
+            return parent_path;
+        }
+        self.memo.insert((parent_path, func), path);
+        path
+    }
+
     fn open(&mut self, func: u32) {
         let parent = self.stack.last().map_or(0, |a| a.func);
-        let depth = self.depth.entry(func).or_insert(Depth { count: 0, self_recursed: false });
-        let outermost = depth.count == 0;
+        let parent_path = self.stack.last().map_or(0, |a| a.path);
+
+        let held = self.depth.get(&func).map(|d| (d.count, d.path, d.recursion_path));
+        let (path, outermost, counts_here) = match held {
+            // Not on the stack: an ordinary context under whoever called it.
+            None | Some((0, _, _)) => (self.context(parent_path, func), true, true),
+            // Already on the stack, so this is recursion. Every level runs in
+            // one shared context hanging off the function's own outermost
+            // node, which is what keeps `descend(64)` from interning sixty-
+            // four of them. Hanging it off the outermost node rather than off
+            // the nearest one is also what bounds indirect recursion: the
+            // cycle `f -> g -> f -> g` reaches four contexts and stops.
+            Some((depth_count, outer_path, recursion_path)) => {
+                let recursion_path = if recursion_path == 0 {
+                    self.context(outer_path, func)
+                } else {
+                    recursion_path
+                };
+                if let Some(depth) = self.depth.get_mut(&func) {
+                    depth.recursion_path = recursion_path;
+                }
+                (recursion_path, false, depth_count == 1)
+            }
+        };
+
+        let depth = self.depth.entry(func).or_insert(Depth {
+            count: 0,
+            path,
+            recursion_path: 0,
+            self_recursed: false,
+        });
+        if outermost {
+            depth.path = path;
+            depth.recursion_path = 0;
+        }
         depth.count += 1;
         if !outermost && parent == func {
             depth.self_recursed = true;
         }
-        self.stack.push(Activation { func, parent, start: Instant::now(), outermost });
+
+        // Last, so interning a context the program has not reached before
+        // never lands inside the span this activation is about to measure.
+        self.stack.push(Activation {
+            func,
+            parent,
+            path,
+            start: Instant::now(),
+            child_ns: 0,
+            outermost,
+            counts_here,
+        });
     }
 
     fn close(&mut self) {
+        // Read the clock before any bookkeeping, so none of it lands inside
+        // the span being measured.
+        let now = Instant::now();
         let Some(activation) = self.stack.pop() else {
             return;
         };
+        let elapsed = now.saturating_duration_since(activation.start).as_nanos() as u64;
+
+        // Charge this activation's inclusive time to whoever is still on the
+        // stack, before any branch below can return early. A level whose time
+        // never reaches its caller leaves that caller's self time inflated by
+        // exactly this much, and the subtree stops summing to the whole.
+        if let Some(caller) = self.stack.last_mut() {
+            caller.child_ns = caller.child_ns.saturating_add(elapsed);
+        }
+        let self_ns = elapsed.saturating_sub(activation.child_ns);
+
         let mut self_recursed = false;
         if let Some(depth) = self.depth.get_mut(&activation.func) {
             depth.count -= 1;
@@ -154,9 +254,6 @@ impl ThreadState {
         // the function closes.
         let caller_edge = activation.parent != 0 && activation.parent != activation.func;
         let self_edge = activation.outermost && self_recursed;
-        if !caller_edge && !self_edge && !activation.outermost {
-            return;
-        }
 
         let mut accum = lock(&self.slot.accum);
         if caller_edge {
@@ -165,10 +262,14 @@ impl ThreadState {
         if self_edge {
             *accum.edges.entry((activation.func, activation.func)).or_insert(0) += 1;
         }
+        let stack = accum.stacks.entry(activation.path).or_default();
+        stack.self_ns += self_ns;
+        if activation.counts_here {
+            stack.count += 1;
+        }
         if activation.outermost {
             // Only the outermost activation contributes a duration, so nested
             // recursive time is counted once rather than once per level.
-            let elapsed = activation.start.elapsed().as_nanos() as u64;
             let stat = accum.calls.entry(activation.func).or_default();
             stat.count += 1;
             stat.ns.add(elapsed);
@@ -187,6 +288,7 @@ thread_local! {
     static STATE: RefCell<ThreadState> = RefCell::new(ThreadState {
         stack: Vec::new(),
         depth: IntMap::default(),
+        memo: IntMap::default(),
         slot: register_thread(),
     });
 }
@@ -206,6 +308,14 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(crate) struct Accum {
     pub(crate) edges: IntMap<(u32, u32), u64>,
     pub(crate) calls: IntMap<u32, CallStat>,
+    pub(crate) stacks: IntMap<u32, StackStat>,
+}
+
+/// One calling context's share of a window.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct StackStat {
+    pub(crate) count: u64,
+    pub(crate) self_ns: u64,
 }
 
 #[derive(Default, Clone)]
@@ -296,6 +406,11 @@ impl Accum {
             let mine = self.calls.entry(func).or_default();
             mine.count += stat.count;
             mine.ns.absorb(stat.ns);
+        }
+        for (path, stat) in other.stacks {
+            let mine = self.stacks.entry(path).or_default();
+            mine.count += stat.count;
+            mine.self_ns += stat.self_ns;
         }
     }
 }

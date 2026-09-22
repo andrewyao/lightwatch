@@ -31,6 +31,71 @@ pub fn edge_counts() -> BTreeMap<(&'static str, &'static str), u64> {
         .collect()
 }
 
+/// Every calling context recorded so far, keyed by the chain of function
+/// names from the outermost measured frame down to the context itself.
+///
+/// The value is `(calls, self_ns)`: how many activations opened that context,
+/// and how long they spent outside any measured callee.
+pub fn stacks() -> BTreeMap<Vec<&'static str>, (u64, u64)> {
+    let recorded = calls::snapshot().stacks;
+    let nodes: BTreeMap<u32, (u32, u32)> =
+        registry::path_nodes().into_iter().map(|(id, parent, func)| (id, (parent, func))).collect();
+
+    nodes
+        .keys()
+        .filter_map(|id| {
+            let chain = chain_of(*id, &nodes)?;
+            let stat = recorded.get(id)?;
+            Some((chain, (stat.count, stat.self_ns)))
+        })
+        .collect()
+}
+
+/// The chain of names leading to one context, outermost first.
+fn chain_of(mut id: u32, nodes: &BTreeMap<u32, (u32, u32)>) -> Option<Vec<&'static str>> {
+    let mut chain = Vec::new();
+    while id != 0 {
+        let (parent, func) = *nodes.get(&id)?;
+        chain.push(registry::function_name(func)?);
+        id = parent;
+    }
+    chain.reverse();
+    Some(chain)
+}
+
+/// How many distinct calling contexts this process has named.
+///
+/// The number a recursive function is allowed to add is what keeps a call
+/// tree finite, so it is worth asserting on directly.
+pub fn path_count() -> usize {
+    registry::path_nodes().len()
+}
+
+/// The deepest chain in the call tree.
+pub fn deepest_chain() -> usize {
+    let nodes: BTreeMap<u32, (u32, u32)> =
+        registry::path_nodes().into_iter().map(|(id, parent, func)| (id, (parent, func))).collect();
+    nodes.keys().filter_map(|id| chain_of(*id, &nodes)).map(|chain| chain.len()).max().unwrap_or(0)
+}
+
+/// Contexts refused because the table was full. Non-zero means the flame
+/// graph is shallower than the program actually was.
+pub fn paths_overflowed() -> u64 {
+    registry::paths_overflowed()
+}
+
+/// Time spent in a function and outside any measured callee, summed over
+/// every context it was reached through.
+pub fn self_ns(name: &str) -> u64 {
+    let Some(id) = registry::function_id_by_name(name) else { return 0 };
+    let recorded = calls::snapshot().stacks;
+    registry::path_nodes()
+        .into_iter()
+        .filter(|(_, _, func)| *func == id.0)
+        .filter_map(|(path, _, _)| recorded.get(&path).map(|stat| stat.self_ns))
+        .sum()
+}
+
 /// Closed calls of a function, by registered name. Zero for a function that
 /// has never run, and zero for one that only ever ran as a recursive level of
 /// itself.
