@@ -273,6 +273,14 @@ function paint() {
   const bucket = view.buckets[view.selected];
 
   paintAxis(treeFeed, memory ?? treeFeed, memoryBuckets);
+
+  // A connected feed that has reported nothing is not the same as a feed that
+  // is down, and neither is an empty page. Say which it is.
+  if (!bucket) {
+    paintNothingYet(treeFeed);
+    return;
+  }
+
   if (view.tab === "resources") paintFlame(treeFeed, bucket);
   else paintGraph(treeFeed, bucket);
 
@@ -302,8 +310,10 @@ function paintAxis(treeFeed, memoryFeed, memoryBuckets) {
   const span = (view.buckets.length * view.bucketMs) / 1000;
   const census = mem.keys.length > 0 ? "" : " No census in this session, so the memory strip is empty.";
   ui.axisNote.textContent =
-    `${view.buckets.length} buckets of ${view.bucketMs / 1000}s, ${span.toFixed(0)}s in all, ` +
-    `folded from ${treeFeed.windowMs}ms windows. Click a bucket to pin it.${census}`;
+    view.buckets.length === 0
+      ? `Nothing on the axis yet: this feed has reported no activity since the daemon started.${census}`
+      : `${view.buckets.length} buckets of ${view.bucketMs / 1000}s, ${span.toFixed(0)}s in all, ` +
+        `folded from ${treeFeed.windowMs}ms windows. Click a bucket to pin it.${census}`;
 
   ui.legend.replaceChildren(
     ...view.palette.legend().map((entry) => swatch(entry.color, entry.group)),
@@ -373,6 +383,40 @@ function paintFlatFunctions(feed, bucket) {
       ]),
     ),
   );
+}
+
+/// The feed is connected and has told us nothing worth plotting yet.
+function paintNothingYet(feed) {
+  const frames = feed.windows.length;
+  const held = view.session?.cpu ?? view.session?.memory;
+  const connected = held?.connected ?? false;
+
+  const text = connected
+    ? `Connected to ${sourcesOf(view.session)}, and it has reported no activity yet. ` +
+      `The emitter is polling and the frames are arriving empty, which means the ` +
+      `target has not run a measured function since this daemon started. Exercise ` +
+      `the app and the axis will start filling.`
+    : `${sourcesOf(view.session)} is not connected. Nothing has been recorded, and ` +
+      `nothing will be until it reconnects.`;
+
+  ui.flameWrap.hidden = true;
+  ui.flameNote.textContent = "";
+  ui.flat.replaceChildren(why(text));
+  ui.flameTable.replaceChildren();
+
+  ui.graphWrap.hidden = true;
+  ui.graphNote.textContent = "";
+  ui.graphFlat.replaceChildren(why(text));
+  ui.graphTable.replaceChildren();
+
+  if (frames === 0 && feed.functions.size > 0) {
+    ui.flat.append(
+      why(
+        `${feed.functions.size} functions are registered, so the target has run them ` +
+          `at some point. They are simply not running now.`,
+      ),
+    );
+  }
 }
 
 function sourcesOf(session) {
