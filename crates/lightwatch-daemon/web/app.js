@@ -67,7 +67,7 @@ const view = {
 const flame = new Flame(ui.flame, null);
 const force = new Force(ui.graph);
 const cpuStrip = new Strip(ui.cpuStrip, {
-  height: 64,
+  height: 88,
   colorOf: (group) => view.palette.colorOf(group),
 });
 const memoryStrip = new Strip(ui.memoryStrip, {
@@ -305,7 +305,10 @@ function paintAxis(treeFeed, memoryFeed, memoryBuckets) {
   ui.axisStart.textContent = first ? seconds(first.startTNs) : "";
   ui.axisEnd.textContent = last ? `${seconds(last.endTNs)} since start` : "";
 
-  ui.cpuStripLabel.textContent = `cpu · ${cpuMeasure(treeFeed)}`;
+  const capped = cpu.clipped
+    ? ` · scaled to ${duration(cpu.peak)}, taller bars are capped and marked`
+    : "";
+  ui.cpuStripLabel.textContent = `cpu · ${cpuMeasure(treeFeed)}${capped}`;
 
   const span = (view.buckets.length * view.bucketMs) / 1000;
   const census = mem.keys.length > 0 ? "" : " No census in this session, so the memory strip is empty.";
@@ -685,8 +688,9 @@ for (const [strip, canvas] of [
       ([ty, reading]) =>
         [flame.feed?.typeNameOf(ty) ?? `type ${ty}`, `${reading.live.toLocaleString()} · ${bytes(reading.bytes)}`],
     );
+    const cpuNs = totalSelfNs(bucket) || [...bucket.calls.values()].reduce((t, c) => t + c.ns, 0);
     showTip(event, `${seconds(bucket.startTNs)} – ${seconds(bucket.endTNs)}`, null, [
-      ["cpu self time", duration(totalSelfNs(bucket))],
+      ["cpu time", duration(cpuNs)],
       ...live,
     ]);
   });

@@ -11,6 +11,9 @@ import { groupOf } from "./palette.js";
 
 const GAP = 2;
 
+/// The least a bucket with any activity in it may be drawn as.
+const MIN_VISIBLE = 2;
+
 /// Per bucket, time by module.
 ///
 /// Self time when the source carries a call tree, because self time adds up
@@ -60,8 +63,34 @@ export function memorySeries(feed, buckets, palette) {
 function stackBy(buckets, extract, palette) {
   const columns = buckets.map(extract);
   const keys = [...new Set(columns.flatMap((column) => [...column.keys()]))];
-  const peak = Math.max(1, ...columns.map((column) => sum(column.values())));
-  return { columns, keys, peak, palette };
+  return { columns, keys, ...ceilingFor(columns), palette };
+}
+
+/// How tall the strip's top is worth, in the series' own units.
+///
+/// Not the largest bucket. A profile is spiky by nature — one garbage
+/// collection, one cold cache, one window where the user did something — and
+/// scaling to that bucket leaves every ordinary one under a pixel. Measured
+/// against a real feed: the busiest bucket held 208ms and the ninetieth
+/// percentile held 10ms, so nine buckets in ten drew at 3px in a 64px strip
+/// and the chart showed one spike above a flat line that was not flat.
+///
+/// So the ceiling is the ninety-fifth percentile of the buckets that did
+/// something, and only when the largest genuinely dwarfs it. Bars still grow
+/// from zero, so the encoding stays linear and honest over the range that is
+/// drawn; what is above the ceiling is marked rather than silently flattened.
+function ceilingFor(columns) {
+  const totals = columns.map((column) => sum(column.values())).filter((total) => total > 0);
+  if (totals.length === 0) return { peak: 1, clipped: false, busiest: 0 };
+
+  totals.sort((a, b) => a - b);
+  const busiest = totals[totals.length - 1];
+  const percentile = totals[Math.floor((totals.length - 1) * 0.95)];
+
+  // Under three to one there is no outlier problem to solve, and clipping
+  // would only throw away range for nothing.
+  const ceiling = busiest > percentile * 3 ? percentile : busiest;
+  return { peak: Math.max(1, ceiling), clipped: ceiling < busiest, busiest };
 }
 
 const sum = (values) => [...values].reduce((total, value) => total + value, 0);
@@ -100,16 +129,36 @@ export class Strip {
         ctx.fillRect(x, 0, Math.max(1, step), this.height);
       }
 
+      const total = [...column.values()].reduce((sum, value) => sum + value, 0);
+      // A bucket where something happened is never allowed to round away to
+      // nothing: "barely any" and "none at all" are different answers.
+      const scale =
+        total > 0
+          ? Math.max(this.height / series.peak, MIN_VISIBLE / total)
+          : 0;
+
       let y = this.height;
       for (const key of series.keys) {
         const value = column.get(key) ?? 0;
         if (value <= 0) continue;
-        const h = (value / series.peak) * this.height;
+        const h = value * scale;
+        if (y - h < -this.height) break;
         ctx.fillStyle = this.colorOf(key);
         // A 2px surface gap between segments, so a stack of one module's hue
-        // does not read as a single block.
-        ctx.fillRect(x + 0.5, y - h + GAP / 2, Math.max(1, step - 1), Math.max(1, h - GAP));
-        y -= h;
+        // does not read as a single block. The gap comes out of the bar, so a
+        // segment thinner than the gap would vanish; give it a floor.
+        const drawn = Math.max(1, h - GAP);
+        ctx.fillRect(x + 0.5, y - h + GAP / 2, Math.max(1, step - 1), drawn);
+        // Advance by what was actually drawn when the floor kicked in, or a
+        // stack of thin segments paints them all on top of each other.
+        y -= Math.max(h, drawn + GAP);
+      }
+
+      // Over the ceiling. Marked, so an outlier reads as an outlier rather
+      // than as a bucket that happens to reach the top.
+      if (total * scale > this.height + 0.5) {
+        ctx.fillStyle = "#dfe5ee";
+        ctx.fillRect(x + 0.5, 0, Math.max(1, step - 1), 2);
       }
 
       if (at === this.hover) {
