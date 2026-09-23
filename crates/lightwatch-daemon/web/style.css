@@ -372,3 +372,50 @@ footer strong {
   margin-top: 6px;
   padding: 14px 18px 16px;
 }
+
+/* What a source that cannot draw a tree shows instead. */
+.flat {
+  margin-top: 10px;
+}
+
+.flat table {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+
+.flat th,
+.flat td {
+  border-bottom: 1px solid var(--line);
+  padding: 5px 8px 5px 0;
+  text-align: left;
+}
+
+.flat th {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+.flat td.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.flat .chain {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.why {
+  background: color-mix(in srgb, var(--stale) 10%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--stale) 40%, var(--line));
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  margin: 10px 0 0;
+  max-width: 78ch;
+  padding: 10px 12px;
+}
+
+.why code {
+  color: var(--stale);
+}

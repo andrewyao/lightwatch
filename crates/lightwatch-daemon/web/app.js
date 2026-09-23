@@ -9,7 +9,7 @@ import { Feed } from "./feed.js";
 import { fold, totalSelfNs, GRANULARITIES, DEFAULT_GRANULARITY_MS } from "./buckets.js";
 import { Palette, groupOf } from "./palette.js";
 import { Flame, buildTree } from "./flame.js";
-import { Strip, cpuSeries, memorySeries } from "./timeline.js";
+import { Strip, cpuSeries, cpuMeasure, memorySeries } from "./timeline.js";
 import { Force, graphOf, DEFAULT_BUDGET } from "./force.js";
 
 const SESSION_POLL_MS = 3000;
@@ -32,6 +32,11 @@ const ui = {
   memoryStrip: el("memory-strip"),
   graph: el("graph"),
   flameNote: el("flame-note"),
+  flameWrap: el("flame-wrap"),
+  flat: el("flat"),
+  graphWrap: el("graph-wrap"),
+  graphFlat: el("graph-flat"),
+  cpuStripLabel: el("cpu-strip-label"),
   axisNote: el("axis-note"),
   graphNote: el("graph-note"),
   legend: el("legend"),
@@ -292,10 +297,13 @@ function paintAxis(treeFeed, memoryFeed, memoryBuckets) {
   ui.axisStart.textContent = first ? seconds(first.startTNs) : "";
   ui.axisEnd.textContent = last ? `${seconds(last.endTNs)} since start` : "";
 
+  ui.cpuStripLabel.textContent = `cpu · ${cpuMeasure(treeFeed)}`;
+
   const span = (view.buckets.length * view.bucketMs) / 1000;
+  const census = mem.keys.length > 0 ? "" : " No census in this session, so the memory strip is empty.";
   ui.axisNote.textContent =
     `${view.buckets.length} buckets of ${view.bucketMs / 1000}s, ${span.toFixed(0)}s in all, ` +
-    `folded from ${treeFeed.windowMs}ms windows. Click a bucket to pin it.`;
+    `folded from ${treeFeed.windowMs}ms windows. Click a bucket to pin it.${census}`;
 
   ui.legend.replaceChildren(
     ...view.palette.legend().map((entry) => swatch(entry.color, entry.group)),
@@ -314,6 +322,19 @@ function swatch(color, label) {
 
 function paintFlame(feed, bucket) {
   if (!bucket) return;
+
+  // A source with no call tree gets the list it can actually support, and an
+  // explanation. Drawing an empty flame graph and calling the program idle
+  // would be a lie about the program rather than about the feed.
+  if (!feed.hasTree()) {
+    ui.flameWrap.hidden = true;
+    ui.flameNote.textContent = "";
+    paintFlatFunctions(feed, bucket);
+    return;
+  }
+  ui.flameWrap.hidden = false;
+  ui.flat.replaceChildren();
+
   const tree = buildTree(feed, bucket);
   flame.draw(tree, view.palette);
 
@@ -324,6 +345,48 @@ function paintFlame(feed, bucket) {
     : "Nothing ran in this bucket.";
 
   paintFlameTable(feed, tree);
+}
+
+/// The degraded view: what a feed carrying only per-function totals can say.
+function paintFlatFunctions(feed, bucket) {
+  const rows = [...bucket.calls]
+    .map(([funcId, stat]) => ({ funcId, ...stat }))
+    .sort((a, b) => b.ns - a.ns);
+
+  const seconds_ = view.bucketMs / 1000;
+  ui.flat.replaceChildren(
+    why(
+      `This session's only emitter is ${sourcesOf(view.session)}, which reports each ` +
+        `function's own totals and nothing about which function called which. ` +
+        `There is no call tree here, so there is no flame graph and no call graph ` +
+        `to draw — not because the program was idle, but because this source cannot ` +
+        `see it. Run the target with the Rust probe (#[lightwatch::measure]) for ` +
+        `stacks, edges and a live-object census.`,
+    ),
+    table(
+      ["function", "module", "time in bucket", "calls"],
+      rows.slice(0, 40).map((row) => [
+        { text: feed.nameOf(row.funcId), className: "chain" },
+        { text: groupOf(feed.functions.get(row.funcId)) },
+        { text: duration(row.ns), className: "num" },
+        { text: `${(row.calls / seconds_).toFixed(0)}/s`, className: "num" },
+      ]),
+    ),
+  );
+}
+
+function sourcesOf(session) {
+  const names = ["cpu", "memory"]
+    .filter((feed) => session?.[feed])
+    .map((feed) => session[feed].source);
+  return [...new Set(names)].join(" and ") || "an unknown emitter";
+}
+
+function why(text) {
+  const p = document.createElement("p");
+  p.className = "why";
+  p.textContent = text;
+  return p;
 }
 
 function paintFlameTable(feed, tree) {
@@ -350,6 +413,24 @@ function paintFlameTable(feed, tree) {
 
 function paintGraph(feed, bucket) {
   if (!bucket) return;
+
+  if (!feed.hasTree()) {
+    ui.graphWrap.hidden = true;
+    ui.graphNote.textContent = "";
+    ui.graphTable.replaceChildren();
+    ui.graphFlat.replaceChildren(
+      why(
+        `Nothing to lay out. ${sourcesOf(view.session)} carries no call tree, so this ` +
+          `daemon has never been told that one of these functions called another. ` +
+          `The Rust probe records that from a thread-local stack; a bridge over an ` +
+          `external profiler has no stack to read.`,
+      ),
+    );
+    return;
+  }
+  ui.graphWrap.hidden = false;
+  ui.graphFlat.replaceChildren();
+
   view.graph = graphOf(feed, bucket, DEFAULT_BUDGET);
   force.settle(view.graph);
   drawGraph(feed);

@@ -37,7 +37,7 @@
         <p class="note" id="axis-note"></p>
       </div>
       <div class="plot axis">
-        <p class="strip-label">cpu · self time by module</p>
+        <p class="strip-label" id="cpu-strip-label">cpu</p>
         <canvas id="cpu-strip"></canvas>
         <p class="strip-label">memory · live bytes by type</p>
         <canvas id="memory-strip"></canvas>
@@ -60,6 +60,7 @@
         <div class="plot" id="flame-wrap">
           <canvas id="flame"></canvas>
         </div>
+        <div id="flat" class="flat"></div>
 
         <details class="table">
           <summary>the same numbers, as a table</summary>
@@ -72,9 +73,10 @@
           <h2>Call graph</h2>
           <p class="note" id="graph-note"></p>
         </div>
-        <div class="plot grow">
+        <div class="plot grow" id="graph-wrap">
           <canvas id="graph"></canvas>
         </div>
+        <div id="graph-flat" class="flat"></div>
         <details class="table">
           <summary>every call that was made, as a table</summary>
           <div id="graph-table"></div>

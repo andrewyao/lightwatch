@@ -11,18 +11,38 @@ import { groupOf } from "./palette.js";
 
 const GAP = 2;
 
-/// Per bucket, self time by module.
+/// Per bucket, time by module.
+///
+/// Self time when the source carries a call tree, because self time adds up
+/// across functions without counting a nanosecond twice. When it does not,
+/// the only thing on the wire is each function's own inclusive duration, and
+/// stacking those overstates any bucket where one measured function called
+/// another. It is what there is, and `cpuMeasure` says which one is drawn so
+/// the label can too.
 export function cpuSeries(feed, buckets, palette) {
+  const fromTree = feed.hasTree();
   return stackBy(buckets, (bucket) => {
     const byGroup = new Map();
-    for (const [pathId, stat] of bucket.stacks) {
-      const node = feed.paths.get(pathId);
-      if (!node) continue;
-      const group = groupOf(feed.functions.get(node.func));
-      byGroup.set(group, (byGroup.get(group) ?? 0) + stat.selfNs);
+    if (fromTree) {
+      for (const [pathId, stat] of bucket.stacks) {
+        const node = feed.paths.get(pathId);
+        if (!node) continue;
+        const group = groupOf(feed.functions.get(node.func));
+        byGroup.set(group, (byGroup.get(group) ?? 0) + stat.selfNs);
+      }
+    } else {
+      for (const [funcId, stat] of bucket.calls) {
+        const group = groupOf(feed.functions.get(funcId));
+        byGroup.set(group, (byGroup.get(group) ?? 0) + stat.ns);
+      }
     }
     return byGroup;
   }, palette);
+}
+
+/// What `cpuSeries` was able to measure, for the strip's label.
+export function cpuMeasure(feed) {
+  return feed.hasTree() ? "self time by module" : "time in calls by module, no call tree in this feed";
 }
 
 /// Per bucket, live bytes by type. A reading, never a sum: this series must be

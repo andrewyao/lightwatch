@@ -72,6 +72,16 @@ export class Feed {
     }
   }
 
+  /// Whether this source carries a call tree.
+  ///
+  /// The Rust probe does. A bridge over an external profiler does not: it
+  /// reports per-function totals and has no stack to report. Everything that
+  /// needs a tree has to ask before drawing an empty one and calling the
+  /// program idle.
+  hasTree() {
+    return this.paths.size > 0;
+  }
+
   /// True when the stream named something this feed has no name for, which a
   /// fresh snapshot fixes.
   needsNames() {
